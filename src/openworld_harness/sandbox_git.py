@@ -67,10 +67,11 @@ async def large_inputs(environment: Any, workdir: str, min_mb: int) -> list[str]
     repository is kept as it is, and setup writes no excludes into it).
 
     Mounted filesystems are searched too, since ``git add -A`` stages them. POSIX
-    ``find`` only (busybox has no ``-printf``). Best effort: a failing listing
-    keeps what it found and logs the rest, and one that times out or cannot
-    run excludes nothing, because the excludes only save time. A dead sandbox
-    still raises."""
+    ``find`` only (busybox has no ``-printf``). Best effort, because the
+    excludes only save time: a listing that exits nonzero (an error, or a
+    timeout some environments report as -1) keeps what it found and logs the
+    rest, and one whose exec raises (a timeout, a transient error) excludes
+    nothing. A dead sandbox still raises."""
     wd = shlex.quote(workdir)
     try:
         result = await environment.exec(
