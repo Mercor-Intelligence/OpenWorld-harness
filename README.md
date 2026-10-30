@@ -36,12 +36,14 @@ this harness keeps; the model-facing prompts still call the agent Proximus.
   removed and the model is told how to shrink the commit; a leftover `index.lock`
   is reported instead of waited on.
 - OpenAI gpt-5-series requests with tools ask for reasoning summaries at the
-  default effort too, so the trajectory's reasoning is not empty.
+  default effort too, and every reasoning item of a turn is kept (LiteLLM's bridge
+  kept only the last of consecutive ones, where gpt-6 models do not summarize), so
+  summaries reach the trajectory and all encrypted reasoning is replayed.
 - The harness's own messages (continue nudges, error notes) are user steps in
   `trajectory.json`, tagged `extra.harness_message`.
 - The compaction request reads as a routine checkpoint instead of opening with
   "Pause the task.", which some summaries passed on as a user pause.
-- LiteLLM is locked to 1.106.2.
+- LiteLLM is locked to 1.106.2, with the `mcp` extra its Responses path imports.
 
 ## Install and run
 
@@ -282,8 +284,9 @@ excludes. Invalid options raise `ValueError` before any sandbox starts.
 - Requires Harbor `0.23.0` and Python 3.12+. Upstream was tested on Python
   3.12–3.14 with LiteLLM 1.97.0 and 1.105.1; the fork's CI runs Python 3.12 with
   the locked LiteLLM 1.106.2.
-- Installs a small process-wide LiteLLM shim for reasoning-only Responses turns
-  at LLM construction; Harbor itself is not patched.
+- Installs a small process-wide LiteLLM shim at LLM construction: it accepts
+  reasoning-only Responses turns and keeps every reasoning item of a turn. Harbor
+  itself is not patched.
 - No MCP servers, Harbor skills, session resume or handoff; tasks configuring MCP
   servers or skills fail at setup.
 - Reproducing a published score needs the original model configuration.
