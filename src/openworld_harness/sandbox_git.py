@@ -55,8 +55,10 @@ async def ensure_git(environment: Any, static_git: Path) -> str:
 
 def gitignore_literal(path: str) -> str:
     """An anchored .gitignore pattern matching exactly this workspace-relative
-    path."""
-    return "/" + re.sub(r"([\\*?\[\]!#])", r"\\\1", path)
+    path. Trailing spaces are escaped too: git strips them otherwise."""
+    escaped = re.sub(r"([\\*?\[\]!#])", r"\\\1", path)
+    stripped = escaped.rstrip(" ")
+    return "/" + stripped + "\\ " * (len(escaped) - len(stripped))
 
 
 async def large_inputs(environment: Any, workdir: str, min_mb: int) -> list[str] | None:

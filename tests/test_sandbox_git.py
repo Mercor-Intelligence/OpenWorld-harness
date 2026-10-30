@@ -84,6 +84,25 @@ def test_gitignore_literal_escapes_wildmatch() -> None:
     )
     assert gitignore_literal("data/#1 [a]*?.bin") == "/data/\\#1 \\[a\\]\\*\\?.bin"
     assert gitignore_literal("!x") == "/\\!x"
+    assert gitignore_literal("data.bin  ") == "/data.bin\\ \\ "
+
+
+def test_gitignore_literal_matches_exactly_that_file_in_git(tmp_path: Path) -> None:
+    names = ["data.bin ", "#1 [a]*?.bin", "!x", "back\\slash", "in ner"]
+    decoys = ["data.bin", "#1 a.bin", "x", "in"]
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    for name in names + decoys:
+        (tmp_path / name).write_text("x")
+    exclude = tmp_path / ".git" / "info" / "exclude"
+    exclude.write_text("".join(gitignore_literal(n) + "\n" for n in names))
+    status = subprocess.run(
+        ["git", "-C", str(tmp_path), "status", "--porcelain", "--ignored", "-z"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    ignored = {e[3:] for e in status.split("\0") if e.startswith("!! ")}
+    assert ignored == set(names)
 
 
 async def test_large_inputs() -> None:
