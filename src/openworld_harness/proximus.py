@@ -569,17 +569,19 @@ class Proximus(BaseAgent):
             self.logger.warning(f"Auto-submission errored: {e}")
 
     async def _submit(self, args: tools.SubmitArgs) -> tools.ToolResult:
-        """One submit records and arms; a second on a LATER turn confirms
+        """A submit that records arms; a second on a LATER turn confirms
         and ends the run (two submits in one turn must not self-confirm).
-        A confirm naming the already-recorded commit REUSES that record:
-        re-recording would pin the just-emptied staging dir as the newest
-        winner, which is what the exit restore hands the verifier. A confirm
-        naming a different commit is new work and records normally."""
+        A submit that fails to record neither arms nor confirms, and cancels a
+        pending confirmation: nothing new was recorded, so the model must not
+        end the run on it. A confirm naming the already-recorded commit REUSES
+        that record: re-recording would pin the just-emptied staging dir as the
+        newest winner, which is what the exit restore hands the verifier. A
+        confirm naming a different commit is new work: it records and ends the
+        run."""
         run = self._run
         confirmed = (
             run.submit_armed_turn is not None and run.submit_armed_turn < run.n_turns
         )
-        run.submit_armed_turn = run.n_turns
         if confirmed:
             winner = self._submissions.winner_hash()
             if winner is not None and await self._submissions.matches_winner(
@@ -590,16 +592,25 @@ class Proximus(BaseAgent):
                 return tools.ToolResult(prompts.SUBMIT_CONFIRMED, ends_run=True)
         try:
             submission = await self._submissions.submit(args.commit)
-            note = prompts.submission_note(
-                self._submissions.success_count(),
-                submission.hash,
-                submission.description,
-            )
         except submissions.SubmissionError as e:
             self.logger.warning(f"Submission recording failed: {e}")
-            note = prompts.submission_failed(str(e), self._submissions.success_count())
+            run.submit_armed_turn = None
+            return tools.ToolResult(
+                prompts.submission_retry(
+                    str(e),
+                    self._submissions.success_count(),
+                    self._elapsed(),
+                    self.config.time_budget_sec,
+                )
+            )
+        note = prompts.submission_note(
+            self._submissions.success_count(),
+            submission.hash,
+            submission.description,
+        )
         if confirmed:
             return tools.ToolResult(f"{note} {prompts.SUBMIT_CONFIRMED}", ends_run=True)
+        run.submit_armed_turn = run.n_turns
         guidance = prompts.submit_guidance(self._elapsed(), self.config.time_budget_sec)
         return tools.ToolResult(f"{note} {guidance}")
 

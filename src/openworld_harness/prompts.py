@@ -47,6 +47,12 @@ SUBMIT_FALLBACK = (
     "result instead."
 )
 
+# A failed submit records nothing, so it never offers to end the run.
+SUBMIT_RETRY = (
+    "Nothing was recorded by this call and the run continues; fix the problem "
+    "and call submit again."
+)
+
 # Deliberately says NOTHING about multiple submissions or the two-submit ending:
 # revealing those up front telegraphs that submissions can be revised, which we
 # want the model to discover only when it submits (the continue-or-confirm nudge
@@ -199,18 +205,25 @@ def handoff_message(
     return "\n\n".join(parts)
 
 
-def submit_guidance(elapsed: float, budget: float | None) -> str:
-    """Continue-or-confirm guidance for a non-final submit, with the
-    time-left sentence when a budget exists."""
+def time_left(elapsed: float, budget: float | None) -> str | None:
+    """The time-left sentence, or None without a budget."""
     if not budget:
-        return SUBMIT_CONTINUE_OR_CONFIRM
+        return None
     remaining = max(0.0, budget - elapsed)
-    time_left = SUBMIT_TIME_LEFT.format(
+    return SUBMIT_TIME_LEFT.format(
         remaining=fmt_duration(remaining),
         budget=fmt_duration(budget),
         percent_left=round(100 * remaining / budget),
     )
-    return f"{time_left} {SUBMIT_CONTINUE_OR_CONFIRM}"
+
+
+def submit_guidance(elapsed: float, budget: float | None) -> str:
+    """Continue-or-confirm guidance for a non-final submit, with the
+    time-left sentence when a budget exists."""
+    left = time_left(elapsed, budget)
+    return (
+        f"{left} {SUBMIT_CONTINUE_OR_CONFIRM}" if left else SUBMIT_CONTINUE_OR_CONFIRM
+    )
 
 
 def submission_note(n: int, commit: str, subject: str) -> str:
@@ -227,6 +240,18 @@ def submission_failed(detail: str, prior_submissions: int = 0) -> str:
             f"submission (#{prior_submissions}) remains your recorded result."
         )
     return f"Submission could not be recorded ({detail}). {SUBMIT_FALLBACK}"
+
+
+def submission_retry(
+    detail: str, prior_submissions: int, elapsed: float, budget: float | None
+) -> str:
+    """A submit that failed to record: what failed, what stays recorded, that
+    the run continues, and the time left."""
+    parts = [submission_failed(detail, prior_submissions), SUBMIT_RETRY]
+    left = time_left(elapsed, budget)
+    if left:
+        parts.append(left)
+    return " ".join(parts)
 
 
 def submissions_list(rows: list[dict[str, Any]]) -> str:

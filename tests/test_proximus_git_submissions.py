@@ -227,7 +227,7 @@ async def test_confirm_with_a_new_commit_records_it(tmp_path, monkeypatch):
 async def test_unknown_commit_fails_readably_and_keeps_prior_winner(
     tmp_path, monkeypatch
 ):
-    # Bad ref first (arms but records nothing), work resets the gate, then a
+    # Bad ref first (records nothing, so it does not arm), some work, then a
     # good submission is recorded and confirmed.
     fake = FakeCompletion(
         [
@@ -252,6 +252,65 @@ async def test_unknown_commit_fails_readably_and_keeps_prior_winner(
     assert context.metadata["n_submissions"] == 1
     assert [r["ok"] for r in context.metadata["submissions"]] == [False, True]
     assert context.metadata["submitted_commit"] == HEAD_HASH
+
+
+async def test_failed_submit_does_not_arm_the_confirmation(tmp_path, monkeypatch):
+    # A garbled hash, then the corrected submit: the correction records and
+    # arms; it must not count as the confirmation of the failed call.
+    fake = FakeCompletion(
+        [
+            git_submit_response(commit="badref"),
+            git_submit_response(call_id="call_a"),
+            git_submit_response(call_id="call_b"),
+        ]
+    )
+    monkeypatch.setattr(litellm, "acompletion", fake)
+
+    agent = make_agent(tmp_path, time_budget_sec=7200)
+    context = AgentContext()
+    await agent.run("Task", GitEnv(), context)  # type: ignore[arg-type]
+
+    tools = [m["content"] for m in read_messages(agent) if m.get("role") == "tool"]
+    assert len(fake.calls) == 3
+    assert "not a commit in the workspace repository" in tools[0]
+    assert "Nothing was recorded by this call and the run continues" in tools[0]
+    assert "time budget remains" in tools[0]
+    assert "confirm this as your final submission" not in tools[0]
+    assert "Submission #1 recorded" in tools[1]
+    assert "confirm this as your final submission" in tools[1]
+    assert "Final submission confirmed" not in tools[1]
+    assert "Final submission confirmed" in tools[2]
+    assert context.metadata is not None
+    assert [r["ok"] for r in context.metadata["submissions"]] == [False, True]
+
+
+async def test_failed_confirm_cancels_the_pending_confirmation(tmp_path, monkeypatch):
+    # good submit (arms) -> bad submit on the next turn: it would have
+    # confirmed, but it recorded nothing, so the run continues unarmed.
+    fake = FakeCompletion(
+        [
+            git_submit_response(),
+            git_submit_response(commit="badref", call_id="call_bad"),
+            git_submit_response(call_id="call_c"),
+            git_submit_response(call_id="call_d"),
+        ]
+    )
+    monkeypatch.setattr(litellm, "acompletion", fake)
+
+    agent = make_agent(tmp_path)
+    context = AgentContext()
+    await agent.run("Task", GitEnv(), context)  # type: ignore[arg-type]
+
+    tools = [m["content"] for m in read_messages(agent) if m.get("role") == "tool"]
+    assert len(fake.calls) == 4
+    assert "previous submission (#1) remains your recorded result" in tools[1]
+    assert "Nothing was recorded by this call" in tools[1]
+    assert "Final submission confirmed" not in tools[1]
+    assert "Submission #2 recorded" in tools[2]
+    assert "confirm this as your final submission" in tools[2]
+    assert "Final submission confirmed" in tools[3]
+    assert context.metadata is not None
+    assert [r["ok"] for r in context.metadata["submissions"]] == [True, False, True]
 
 
 async def test_failed_record_after_a_good_one_names_the_prior_winner(

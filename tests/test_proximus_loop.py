@@ -476,8 +476,11 @@ async def test_submit_ignores_stray_arguments(tmp_path, monkeypatch):
     assert context.metadata["n_submissions"] == 2
 
 
-async def test_failed_record_falls_back_to_final_state(tmp_path, monkeypatch):
-    fake = FakeCompletion(finish_responses())
+async def test_failed_record_never_arms_or_ends_the_run(tmp_path, monkeypatch):
+    # Every record fails (a broken-git sandbox). A failed submit records
+    # nothing, so it neither arms nor confirms: the run continues to its turn
+    # limit, which ends it like a time-out.
+    fake = FakeCompletion([submit_response() for _ in range(3)])
     monkeypatch.setattr(litellm, "acompletion", fake)
 
     class BrokenGitEnv(FakeEnv):
@@ -496,24 +499,29 @@ async def test_failed_record_falls_back_to_final_state(tmp_path, monkeypatch):
 
     env = BrokenGitEnv()
     context = AgentContext()
-    agent = make_agent(tmp_path)
+    agent = make_agent(tmp_path, max_turns=3, time_budget_sec=7200)
     await agent.run("Do a task", env, context)  # type: ignore[arg-type]
 
     messages = read_messages(agent)
     tool_contents = [m["content"] for m in messages if m.get("role") == "tool"]
-    assert any("could not be recorded" in c for c in tool_contents)
-    assert any("final workspace state" in c for c in tool_contents)
-    # The consecutive submit still ends the session despite failed recordings
-    # (a broken-git sandbox must not trap the run).
-    assert any("Final submission confirmed" in c for c in tool_contents)
+    assert len(tool_contents) == 3
+    for content in tool_contents:
+        assert "could not be recorded" in content
+        assert "final workspace state" in content
+        assert "Nothing was recorded by this call and the run continues" in content
+        assert "time budget remains" in content
+        assert "confirm this as your final submission" not in content
+        assert "Final submission confirmed" not in content
     assert context.metadata is not None
+    assert context.metadata["ended_by_submit"] is False
     assert context.metadata["n_submissions"] == 0
-    # Failed model submit calls remain recorded for telemetry. A confirmed
-    # ending never adds a hidden auto-submission or changes the selected state.
-    assert [s["ok"] for s in context.metadata["submissions"]] == [False, False]
-    assert all(not s.get("auto") for s in context.metadata["submissions"])
+    # The model's failed calls stay recorded for telemetry, and the exit
+    # auto-submission tried (and failed) too.
+    rows = context.metadata["submissions"]
+    assert [s["ok"] for s in rows] == [False] * 4
+    assert [bool(s.get("auto")) for s in rows] == [False, False, False, True]
     assert context.metadata["submitted_commit"] is None
-    assert len(env.record_calls) == 2
+    assert len(env.record_calls) == 4
 
 
 async def test_proactive_compaction(tmp_path, monkeypatch):
