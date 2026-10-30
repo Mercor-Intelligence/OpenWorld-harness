@@ -139,7 +139,7 @@ Both are off by default and run once, as root, before the loop:
 - `static_git_path`: host path of a statically linked `git`. When the sandbox has no
   `git`, it is copied to `/usr/local/bin/git` (with the templates git needs), so
   submissions work in images that ship none. Without it such an image fails at
-  setup.
+  setup. A host path is a run option (`--ak` or overrides): task tables reject it.
 - `large_input_exclude_mb`: in a fresh workspace (not yet a git repository), files
   larger than this many MB are added to `workspace_git_excludes`, so the baseline
   commit never hashes multi-GB inputs. The files stay in place.

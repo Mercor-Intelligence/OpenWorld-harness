@@ -30,7 +30,11 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-from openworld_harness.config import WEB_OPTION_PREFIX, OpenWorldConfig
+from openworld_harness.config import (
+    RUN_ONLY_OPTIONS,
+    WEB_OPTION_PREFIX,
+    OpenWorldConfig,
+)
 from openworld_harness.submissions import (
     DEFAULT_SUBMISSION_TIMEOUT_SEC,
     RESTORE_TIMEOUT_SEC,
@@ -112,12 +116,17 @@ def task_agent_kwargs(
         (f"[agent.{name}]", table),
         (f'[agent.{name}.models."{model_name}"]', model_table),
     ):
-        web = sorted(key for key in layer if key.startswith(WEB_OPTION_PREFIX))
-        if web:
-            # Whether a run may search the web, and as of when, is the runner's call.
+        run_only = sorted(
+            key
+            for key in layer
+            if key.startswith(WEB_OPTION_PREFIX) or key in RUN_ONLY_OPTIONS
+        )
+        if run_only:
+            # Whether a run may search the web, and as of when, and which host
+            # files it copies into the sandbox, are the runner's call.
             raise ValueError(
-                f"{where} in {task_dir} sets {', '.join(web)}: web options are "
-                "run options, passed as overrides"
+                f"{where} in {task_dir} sets {', '.join(run_only)}: web options "
+                "and host paths are run options, passed as overrides"
             )
     # Relative template paths in the task's own tables are task-relative.
     for layer in (table, model_table):

@@ -16,7 +16,7 @@ from harbor.cli.utils import parse_kwargs
 from harbor.models.trial.config import AgentConfig
 
 from openworld_harness import OpenWorldHarness, task_agent_kwargs
-from openworld_harness.config import OpenWorldConfig
+from openworld_harness.config import RUN_ONLY_OPTIONS, OpenWorldConfig
 
 MODEL = "openai/gpt-test"
 # Optional: the tasks/ directory of a FrontierSWE v2 checkout.
@@ -97,7 +97,8 @@ FIELD_VALUES: dict[str, Any] = {
     "api_base": "http://127.0.0.1:9/v1",
     "max_thinking_tokens": 2048,
     "model_info": {"max_input_tokens": 77777, "supports_vision": False},
-    # Web options are run options: they round-trip as overrides, not task keys.
+    # Web options are run options (as is static_git_path, above): they
+    # round-trip as overrides, not task keys.
     "web_snapshot_as_of": "2026-06-01T00:00:00Z",
     "web_max_searches": 7,
     "web_max_fetches": 9,
@@ -113,12 +114,17 @@ FIELD_VALUES: dict[str, Any] = {
 }
 
 
-def web_overrides(values: dict[str, Any]) -> dict[str, Any]:
-    """The web options among ``values``, with the cutoff that turns them on."""
+def run_only(field: str) -> bool:
+    return field.startswith("web_") or field in RUN_ONLY_OPTIONS
+
+
+def run_overrides(values: dict[str, Any]) -> dict[str, Any]:
+    """The run options among ``values``, with the cutoff that turns on any web
+    options."""
     web = {k: v for k, v in values.items() if k.startswith("web_")}
-    return (
-        {"web_snapshot_as_of": FIELD_VALUES["web_snapshot_as_of"], **web} if web else {}
-    )
+    if web:
+        web = {"web_snapshot_as_of": FIELD_VALUES["web_snapshot_as_of"], **web}
+    return {k: v for k, v in values.items() if k in RUN_ONLY_OPTIONS} | web
 
 
 def test_values_cover_every_field():
@@ -143,8 +149,8 @@ def test_every_field_round_trips_through_task_toml_and_factory(
     if field == "api_key_env":
         monkeypatch.setenv(value, "roundtrip-key")
 
-    if field.startswith("web_"):
-        overrides = web_overrides({field: value})
+    if run_only(field):
+        overrides = run_overrides({field: value})
         kwargs = task_agent_kwargs(write_task(task_dir, {}), MODEL, overrides)
         assert kwargs == overrides
     else:
@@ -179,9 +185,9 @@ def test_all_fields_together(tmp_path, monkeypatch):
     (task_dir / "prompt.j2").write_text("{{ instruction }}")
     # max_thinking_tokens and reasoning_effort are mutually exclusive.
     values = {k: v for k, v in FIELD_VALUES.items() if k != "max_thinking_tokens"}
-    table = {k: v for k, v in values.items() if not k.startswith("web_")}
+    table = {k: v for k, v in values.items() if not run_only(k)}
     kwargs = task_agent_kwargs(
-        write_task(task_dir, table), MODEL, web_overrides(values)
+        write_task(task_dir, table), MODEL, run_overrides(values)
     )
     agent = make_agent(kwargs, tmp_path / "logs")
     for field, value in values.items():

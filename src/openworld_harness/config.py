@@ -11,6 +11,8 @@ from pydantic import ConfigDict, Field, field_validator, model_validator
 BUDGET_MARGIN_SEC = 120
 # Options of the web tools (OpenWorldConfig.web_*).
 WEB_OPTION_PREFIX = "web_"
+# Host paths, which a task table may not set (nor the web options).
+RUN_ONLY_OPTIONS = frozenset({"static_git_path"})
 
 
 class ProximusConfig(AgentOptions):
@@ -204,10 +206,15 @@ class OpenWorldConfig(ProximusConfig):
     @model_validator(mode="after")
     def _web_options_need_a_cutoff(self) -> Self:
         if self.web_snapshot_as_of is None:
+            # Changed from the default, not merely given: a dumped no-web config
+            # (every field set) validates again.
+            fields = type(self).model_fields
             stray = sorted(
                 f
                 for f in self.model_fields_set
-                if f.startswith(WEB_OPTION_PREFIX) and f != "web_snapshot_as_of"
+                if f.startswith(WEB_OPTION_PREFIX)
+                and f != "web_snapshot_as_of"
+                and getattr(self, f) != fields[f].get_default()
             )
             if stray:
                 raise ValueError(
