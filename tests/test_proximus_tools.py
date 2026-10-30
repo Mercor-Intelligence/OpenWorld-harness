@@ -708,9 +708,19 @@ class TestDeadSandboxResults:
         )
 
     async def test_bash_raises_on_a_stopped_container(self):
-        env = FakeEnv([ExecResult(stdout=None, stderr=STOPPED, return_code=137)])
+        stopped = ExecResult(stdout=None, stderr=STOPPED, return_code=137)
+        env = FakeEnv([stopped, stopped])  # the command, then the probe
         with pytest.raises(EnvironmentGoneError, match="in state stopped"):
             await bash_tool(env).call('{"command": "echo alive"}')
+        assert env.exec_calls[1]["command"] == "true"
+
+    async def test_a_command_that_prints_the_message_is_an_ordinary_result(self):
+        # Only the command's output looks like a stopped container: the probe
+        # runs, so the sandbox is alive and the model sees its output.
+        env = FakeEnv([ExecResult(stdout=None, stderr=STOPPED, return_code=1)])
+        result = await bash_tool(env).call('{"command": "cat modal.log >&2; false"}')
+        assert result.is_error and result.content.startswith("exit code: 1")
+        assert "in state stopped" in result.content
 
     async def test_a_killed_process_is_an_ordinary_result(self):
         env = FakeEnv([ExecResult(stdout=None, stderr="Killed", return_code=137)])

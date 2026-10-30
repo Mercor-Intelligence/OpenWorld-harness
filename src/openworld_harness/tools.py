@@ -383,7 +383,11 @@ class ToolExecutor:
                 self._exec_failures = 0
             raise
         self._exec_failures = 0
-        raise_if_exec_result_gone(result)
+        # The command's own output can look the same, so the sandbox decides.
+        if exec_result_shows_environment_gone(result) and not (
+            await self._sandbox_answers()
+        ):
+            raise_if_exec_result_gone(result)
         body = format_exec_output(result.stdout, result.stderr)
         elapsed = time.monotonic() - started
         if self._looks_like_timeout(result.return_code, elapsed, timeout):
