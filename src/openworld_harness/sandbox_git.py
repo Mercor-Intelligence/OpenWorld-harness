@@ -71,9 +71,11 @@ async def large_inputs(environment: Any, workdir: str, min_mb: int) -> list[str]
     wd = shlex.quote(workdir)
     try:
         result = await environment.exec(
-            f'd={wd}; while :; do test -e "$d/.git" && exit {NOT_A_FRESH_WORKSPACE};'
-            ' [ "$d" = / ] && break; d=$(dirname "$d"); done;'
-            f" cd {wd} && find . -type f -size +{int(min_mb) * 1024}k",
+            # $PWD is absolute, so the walk up always reaches /.
+            f'cd {wd} || exit 1; d=$PWD; while :; do test -e "$d/.git" &&'
+            f' exit {NOT_A_FRESH_WORKSPACE}; [ "$d" = / ] && break;'
+            ' d=$(dirname "$d"); done;'
+            f" find . -type f -size +{int(min_mb) * 1024}k",
             timeout_sec=60,
             user="root",
         )

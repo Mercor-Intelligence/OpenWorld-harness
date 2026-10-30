@@ -103,9 +103,15 @@ async def test_large_inputs() -> None:
 class ShellEnvironment:
     """Runs the command for real with POSIX sh, as a sandbox would."""
 
+    def __init__(self, timeout_sec: int | None = None) -> None:
+        self.timeout_sec = timeout_sec  # overrides the caller's, to fail fast
+
     async def exec(self, command: str, timeout_sec: int | None = None, user=None):
         done = subprocess.run(
-            ["sh", "-c", command], capture_output=True, text=True, timeout=timeout_sec
+            ["sh", "-c", command],
+            capture_output=True,
+            text=True,
+            timeout=self.timeout_sec or timeout_sec,
         )
         return ExecResult(
             stdout=done.stdout, stderr=done.stderr, return_code=done.returncode
@@ -124,6 +130,19 @@ async def test_large_inputs_runs_in_a_real_shell(tmp_path: Path) -> None:
     assert await large_inputs(ShellEnvironment(), str(tmp_path), 1) is None
     # A workdir inside an enclosing repository is not fresh either.
     assert await large_inputs(ShellEnvironment(), str(tmp_path / "data"), 1) is None
+
+
+async def test_large_inputs_walks_up_from_a_relative_workdir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "w").mkdir()
+    with open(tmp_path / "w" / "big.bin", "wb") as f:
+        f.truncate(2 << 20)
+    monkeypatch.chdir(tmp_path)
+    assert await large_inputs(ShellEnvironment(timeout_sec=10), "w", 1) == ["/big.bin"]
+    (tmp_path / ".git").mkdir()
+    assert await large_inputs(ShellEnvironment(timeout_sec=10), "w", 1) is None
+    assert await large_inputs(ShellEnvironment(timeout_sec=10), ".", 1) is None
 
 
 async def test_a_listing_that_times_out_excludes_nothing(
