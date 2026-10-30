@@ -59,19 +59,16 @@ def _is_environment_transport_loss(error: Exception) -> bool:
     )
 
 
-def _names_a_stopped_container(text: str) -> bool:
-    # Modal: 'executing processes for container: cannot execute in container
-    # "ta-..." in state stopped'.
-    text = text.lower()
-    return "cannot execute in container" in text and "in state stopped" in text
-
-
-# The whole stderr of an exec Modal refused because the container had stopped.
-_STOPPED_CONTAINER_STDERR = re.compile(
+# Modal refusing an exec because the container has stopped.
+_STOPPED_CONTAINER = re.compile(
     r"(?:executing processes for container: )?"
     r'cannot execute in container "[^"\n]*" in state stopped',
     re.IGNORECASE,
 )
+
+
+def _names_a_stopped_container(text: str) -> bool:
+    return _STOPPED_CONTAINER.search(text) is not None
 
 
 def exec_result_shows_environment_gone(result: Any) -> bool:
@@ -84,8 +81,7 @@ def exec_result_shows_environment_gone(result: Any) -> bool:
     return (
         bool(result.return_code)
         and not str(result.stdout or "").strip()
-        and _STOPPED_CONTAINER_STDERR.fullmatch(str(result.stderr or "").strip())
-        is not None
+        and _STOPPED_CONTAINER.fullmatch(str(result.stderr or "").strip()) is not None
     )
 
 

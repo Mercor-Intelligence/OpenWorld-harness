@@ -255,13 +255,16 @@ class Submissions:
 
     def valid_hash_count(self) -> int:
         """Successful rows that carry a complete Git object id."""
-        return sum(
-            1
+        return len(self._restorable())
+
+    def _restorable(self) -> list[dict[str, Any]]:
+        return [
+            entry
             for entry in self._submissions
             if entry.get("ok")
             and isinstance(entry.get("hash"), str)
             and _FULL_COMMIT_OID.fullmatch(entry["hash"]) is not None
-        )
+        ]
 
     def summary(self) -> list[dict[str, Any]]:
         """Per-submission rows for run metadata and ``list_submissions``."""
@@ -271,13 +274,7 @@ class Submissions:
         ]
 
     def _winner(self) -> dict[str, Any] | None:
-        winners = [
-            entry
-            for entry in self._submissions
-            if entry.get("ok")
-            and isinstance(entry.get("hash"), str)
-            and _FULL_COMMIT_OID.fullmatch(entry["hash"]) is not None
-        ]
+        winners = self._restorable()
         chosen = [entry for entry in winners if not entry.get("auto")] or winners
         return chosen[-1] if chosen else None
 
