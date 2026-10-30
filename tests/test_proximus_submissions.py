@@ -257,16 +257,16 @@ async def test_submit_passes_the_model_ref_out_of_band(tmp_path: Path):
     assert "rm -rf" not in call["command"]
 
 
-async def test_failed_recording_does_not_consume_an_index(tmp_path: Path):
-    # The pin index counts successful recordings only: after a failure the
-    # next success is still submission #1, matching the model-facing note.
+async def test_a_failed_recording_keeps_its_number(tmp_path: Path):
+    # The pin index is the row's number, failed calls included, so the ref,
+    # the model-facing note and list_submissions all agree.
     env = FakeEnv([RECORD_BAD_REF, RECORD_OK])
     subs = make_submissions(tmp_path, env)
     with pytest.raises(SubmissionError):
         await subs.submit("badref")
-    await subs.submit("HEAD")
-    assert env.exec_calls[0]["env"]["idx"] == "1"
-    assert env.exec_calls[1]["env"]["idx"] == "1"
+    submission = await subs.submit("HEAD")
+    assert [call["env"]["idx"] for call in env.exec_calls] == ["1", "2"]
+    assert submission.index == 2
     assert subs.success_count() == 1
 
 

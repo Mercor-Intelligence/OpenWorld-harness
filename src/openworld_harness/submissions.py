@@ -117,8 +117,9 @@ class Submissions:
         tell it from ones the model chose to make."""
         started = time.monotonic()
         try:
+            # Pinned under the row's number, the one the model is shown.
             hash_, description, harness_committed = await self._resolve_and_pin(
-                self.success_count() + 1, ref
+                len(self._submissions) + 1, ref
             )
         except SubmissionError as e:
             failure: dict[str, Any] = {

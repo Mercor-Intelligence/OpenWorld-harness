@@ -576,7 +576,7 @@ class Proximus(BaseAgent):
             submission = await self._submissions.submit("", auto=True)
             self.logger.info(
                 "Auto-recorded end-of-run state as submission "
-                f"#{self._submissions.success_count()} ({submission.hash[:12]})."
+                f"#{submission.index} ({submission.hash[:12]})."
             )
         except tools.EnvironmentGoneError as e:
             self.logger.warning(f"Auto-submission skipped: sandbox is gone ({e}).")
