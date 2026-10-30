@@ -687,3 +687,11 @@ def test_consecutive_reasoning_items_are_all_kept():
     # Items LiteLLM already keeps (one per message) are left as they are.
     (choice,) = convert([first, answer])
     assert [i["id"] for i in choice.message.reasoning_items] == ["rs_1"]
+
+    # Interleaved with tool calls, replay could not keep their order: the
+    # items stay as LiteLLM left them, and only the summary text is added.
+    other_call = call.model_copy(update={"id": "fc_2", "call_id": "call_2"})
+    (choice,) = convert([first, call, second, other_call])
+    assert [i["id"] for i in choice.message.reasoning_items] == ["rs_2"]
+    assert choice.message.reasoning_content == "Counting sums of squares."
+    assert len(choice.message.tool_calls) == 2

@@ -1,6 +1,7 @@
 """LiteLLM configuration and transport."""
 
 import copy
+import itertools
 import json
 import logging
 import os
@@ -320,6 +321,15 @@ def _reasoning_item_dict(item: Any) -> dict[str, Any]:
     )
 
 
+def _summary_text(reasoning_items: list[dict[str, Any]]) -> str:
+    return " ".join(
+        str(part.get("text") or "")
+        for item in reasoning_items
+        for part in (item.get("summary") or [])
+        if isinstance(part, dict) and part.get("text")
+    )
+
+
 def _choices_from_reasoning_only_output(output_items: list[Any]) -> list[Any]:
     """A Responses turn that is only reasoning still has a CoT to replay.
 
@@ -332,12 +342,7 @@ def _choices_from_reasoning_only_output(output_items: list[Any]) -> list[Any]:
     from litellm.types.utils import Choices, Message
 
     reasoning_items = [_reasoning_item_dict(item) for item in output_items]
-    summary_text = " ".join(
-        str(part.get("text") or "")
-        for item in reasoning_items
-        for part in (item.get("summary") or [])
-        if isinstance(part, dict) and part.get("text")
-    )
+    summary_text = _summary_text(reasoning_items)
     message = Message(
         role="assistant",
         content="",
@@ -348,12 +353,15 @@ def _choices_from_reasoning_only_output(output_items: list[Any]) -> list[Any]:
 
 
 def _keep_every_reasoning_item(choices: list[Any], output_items: list[Any]) -> None:
-    """Put back the reasoning items LiteLLM dropped, in output order.
+    """Put back the reasoning LiteLLM dropped.
 
-    LiteLLM keeps only the last of consecutive reasoning items before a
-    message or tool call. gpt-6 models emit several and summarize in an
-    earlier one, so the summary never reached the trajectory and the
-    earlier items' encrypted CoT was never replayed.
+    LiteLLM keeps only the last of the reasoning items before a message
+    (tool calls do not flush them). gpt-6 models emit several and summarize
+    in an earlier one, so the summary never reached the trajectory and the
+    earlier items' encrypted CoT was never replayed. Every summary goes into
+    reasoning_content, which is not replayed. The items themselves are put
+    back only when they all lead the output: replay sends a turn's reasoning
+    before its tool calls, which keeps their order only then.
     """
     reasoning = [
         _reasoning_item_dict(item)
@@ -365,14 +373,10 @@ def _keep_every_reasoning_item(choices: list[Any], output_items: list[Any]) -> N
     message = choices[0].message
     if len(getattr(message, "reasoning_items", None) or []) >= len(reasoning):
         return
-    message.reasoning_items = reasoning
-    summary_text = " ".join(
-        str(part.get("text") or "")
-        for item in reasoning
-        for part in item["summary"]
-        if part.get("text")
-    )
-    message.reasoning_content = summary_text or None
+    message.reasoning_content = _summary_text(reasoning) or None
+    leading = len(list(itertools.takewhile(_is_reasoning_output_item, output_items)))
+    if leading == len(reasoning):
+        message.reasoning_items = reasoning
 
 
 def _install_litellm_reasoning_only_patch() -> None:
