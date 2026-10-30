@@ -83,6 +83,7 @@ async def large_inputs(environment: Any, workdir: str, min_mb: int) -> list[str]
         return []
     if result.return_code == NOT_A_FRESH_WORKSPACE:
         return None
+    tools.raise_if_exec_result_gone(result)
     paths = [
         line[2:]
         for line in (result.stdout or "").splitlines()

@@ -206,3 +206,18 @@ async def test_run_reports_platform_git_even_when_the_run_fails(
         "platform_git": "installed",
         "platform_git_excludes": 2,
     }
+
+
+async def test_a_stopped_container_is_not_a_partial_listing() -> None:
+    from openworld_harness.tools import EnvironmentGoneError
+
+    class Stopped(FakeEnvironment):
+        async def exec(self, command: str, timeout_sec=None, user=None):
+            return ExecResult(
+                stderr="executing processes for container: cannot execute in "
+                'container "ta-1" in state stopped',
+                return_code=137,
+            )
+
+    with pytest.raises(EnvironmentGoneError):
+        await large_inputs(Stopped(has_git=True), "/app", 100)
