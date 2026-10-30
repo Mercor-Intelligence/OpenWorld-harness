@@ -51,6 +51,12 @@ def test_openworld_table_reads_like_the_legacy_one(tmp_path):
     )
 
 
+def test_a_web_option_error_names_its_table(tmp_path):
+    text = '[agent.openworld.models."m"]\nweb_max_searches = 3\n'
+    with pytest.raises(ValueError, match=r'\[agent\.openworld\.models\."m"\] in'):
+        task_agent_kwargs(task(tmp_path, text), "m")
+
+
 def test_both_tables_are_rejected(tmp_path):
     text = TOML + '\n[agent.openworld]\nreasoning_effort = "low"\n'
     with pytest.raises(ValueError, match="not both"):
