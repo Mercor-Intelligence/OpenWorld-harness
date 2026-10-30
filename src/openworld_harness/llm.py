@@ -25,7 +25,7 @@ from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler
 from litellm.llms.openai.chat.gpt_5_transformation import OpenAIGPT5Config
 from litellm.types.utils import ModelResponse
 
-from harbor_proximus.config import BUDGET_MARGIN_SEC, ProximusConfig
+from openworld_harness.config import BUDGET_MARGIN_SEC, ProximusConfig
 
 _MODEL_REGISTRATION_LOCK = threading.Lock()
 
@@ -707,7 +707,7 @@ class LLM:
         credentials = resolve_credentials(model_name, config.api_key_env, extra_env)
         self._api_key: str | None = credentials.api_key
         self._api_base: str | None = credentials.api_base
-        # Proximus.run blanks these in the sandbox: Harbor overlays the agent
+        # OpenWorldHarness.run blanks these in the sandbox: Harbor overlays the agent
         # env onto sandbox commands.
         self.consumed_env_keys: frozenset[str] = credentials.consumed_env_keys
         # Set by the agent once the run's session id exists; scopes the

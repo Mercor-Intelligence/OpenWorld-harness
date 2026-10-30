@@ -20,14 +20,14 @@ from harbor.models.task.config import MCPServerConfig
 from harbor.utils.templating import render_prompt_template
 from harbor.utils.trajectory_utils import format_trajectory_json
 
-import harbor_proximus.images as images
-import harbor_proximus.llm as llm
-import harbor_proximus.prompts as prompts
-import harbor_proximus.submissions as submissions
-import harbor_proximus.timer as timer
-import harbor_proximus.tools as tools
-import harbor_proximus.utils as utils
-from harbor_proximus.config import ProximusConfig
+import openworld_harness.images as images
+import openworld_harness.llm as llm
+import openworld_harness.prompts as prompts
+import openworld_harness.submissions as submissions
+import openworld_harness.timer as timer
+import openworld_harness.tools as tools
+import openworld_harness.utils as utils
+from openworld_harness.config import ProximusConfig
 
 EMPTY_TURN_STALL_LIMIT = 3
 # Fraction of the context window at which proactive compaction runs
@@ -126,7 +126,7 @@ class Proximus(BaseAgent):
 
     @override
     def version(self) -> str | None:
-        return version("harbor-proximus")
+        return version("openworld-harness")
 
     @override
     async def setup(self, environment: BaseEnvironment) -> None:

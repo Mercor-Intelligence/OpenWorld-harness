@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 from harbor.environments.base import ExecResult
 
-from harbor_proximus.submissions import SubmissionError, Submissions
+from openworld_harness.submissions import SubmissionError, Submissions
 
 pytestmark = [
     pytest.mark.unit,

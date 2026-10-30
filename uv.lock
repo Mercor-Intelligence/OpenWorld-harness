@@ -802,47 +802,6 @@ wheels = [
 ]
 
 [[package]]
-name = "harbor-proximus"
-version = "0.1.0a1"
-source = { editable = "." }
-dependencies = [
-    { name = "harbor" },
-    { name = "litellm" },
-    { name = "pillow" },
-    { name = "pydantic" },
-    { name = "tenacity" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "httpx" },
-    { name = "pillow" },
-    { name = "pyright" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "harbor", specifier = "==0.23.0" },
-    { name = "litellm", specifier = ">=1.97.0,<2" },
-    { name = "pillow", specifier = ">=10" },
-    { name = "pydantic", specifier = ">=2.11.7,<3" },
-    { name = "tenacity", specifier = ">=9.1.2,<10" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "httpx", specifier = ">=0.27" },
-    { name = "pillow", specifier = ">=10" },
-    { name = "pyright", specifier = ">=1.1.414" },
-    { name = "pytest", specifier = ">=8.4.2" },
-    { name = "pytest-asyncio", specifier = ">=1.2" },
-    { name = "ruff", specifier = ">=0.15.17" },
-]
-
-[[package]]
 name = "hf-xet"
 version = "1.7.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1455,6 +1414,49 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/2e/02/6e0ae9cc61bd3169d401077b507b3ebc344745171e1051ab430be012dcd9/opentelemetry_api-1.45.1.tar.gz", hash = "sha256:aa38ed19bcc084ba42782a73255b3582283eced7ad6dddbd6695189e69adfb75", size = 72804, upload-time = "2026-10-06T17:32:58.133Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/1e/41/f7dcf80b81ee8e71c1a2b59f14208bc723edbd89ed027a73b175abf6348e/opentelemetry_api-1.45.1-py3-none-any.whl", hash = "sha256:b31553efa588ae44bc306f863c785c5333a9ecc091248c6ee68b4b6c87fdedfb", size = 60256, upload-time = "2026-10-06T17:32:33.506Z" },
+]
+
+[[package]]
+name = "openworld-harness"
+version = "0.2.0"
+source = { editable = "." }
+dependencies = [
+    { name = "harbor" },
+    { name = "httpx" },
+    { name = "litellm" },
+    { name = "pillow" },
+    { name = "pydantic" },
+    { name = "tenacity" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "httpx" },
+    { name = "pillow" },
+    { name = "pyright" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "harbor", specifier = "==0.23.0" },
+    { name = "httpx", specifier = ">=0.27,<1" },
+    { name = "litellm", specifier = ">=1.97.0,!=1.107.0,<2" },
+    { name = "pillow", specifier = ">=10" },
+    { name = "pydantic", specifier = ">=2.11.7,<3" },
+    { name = "tenacity", specifier = ">=9.1.2,<10" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "pillow", specifier = ">=10" },
+    { name = "pyright", specifier = ">=1.1.414" },
+    { name = "pytest", specifier = ">=8.4.2" },
+    { name = "pytest-asyncio", specifier = ">=1.2" },
+    { name = "ruff", specifier = ">=0.15.17" },
 ]
 
 [[package]]

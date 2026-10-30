@@ -37,4 +37,4 @@ jobs:
       - name: Build and verify wheel
         run: |
           uv build
-          uv run --locked python scripts/verify_wheel.py dist/harbor_proximus-*.whl
+          uv run --locked python scripts/verify_wheel.py dist/openworld_harness-*.whl

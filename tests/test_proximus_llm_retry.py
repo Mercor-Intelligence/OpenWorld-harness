@@ -28,8 +28,8 @@ from litellm.exceptions import (
     ContentPolicyViolationError as LiteLLMContentPolicyViolationError,
 )
 
-from harbor_proximus.config import ProximusConfig
-from harbor_proximus.llm import (
+from openworld_harness.config import ProximusConfig
+from openworld_harness.llm import (
     LLM,
     LLM_RETRY_MAX_WAIT_SEC,
     ParsedResponse,
@@ -165,8 +165,8 @@ async def test_api_key_env_indirection(monkeypatch, tmp_path):
     OpenAI-compatible endpoint onto the single OPENAI_API_KEY)."""
     import litellm
 
-    from harbor_proximus.config import ProximusConfig
-    from harbor_proximus.llm import LLM
+    from openworld_harness.config import ProximusConfig
+    from openworld_harness.llm import LLM
 
     monkeypatch.setenv("META_API_KEY", "sk-meta-test")
     captured: dict = {}
@@ -220,8 +220,8 @@ def test_provider_health_is_atomic_structured_and_redacts_keys(tmp_path):
 
 
 def test_api_key_env_missing_fails_at_construction(monkeypatch):
-    from harbor_proximus.config import ProximusConfig
-    from harbor_proximus.llm import LLM
+    from openworld_harness.config import ProximusConfig
+    from openworld_harness.llm import LLM
 
     monkeypatch.delenv("NOPE_API_KEY", raising=False)
     with pytest.raises(ValueError, match="NOPE_API_KEY"):
@@ -365,7 +365,7 @@ def test_request_too_large_detection_and_no_retry_classification():
     """Body-cap rejections arrive under many guises (a gateway 413 can be a
     RAW AnthropicError, not a litellm class) — detection is message/status
     based, and even an un-converted raw error is never retried."""
-    from harbor_proximus.llm import (
+    from openworld_harness.llm import (
         RequestTooLargeError,
         _is_retryable,
         is_image_limit_error,
@@ -393,7 +393,7 @@ def test_request_too_large_detection_and_no_retry_classification():
 
 
 def test_invalid_image_detection_and_no_retry_classification():
-    from harbor_proximus.llm import (
+    from openworld_harness.llm import (
         InvalidImageError,
         _is_retryable,
         is_invalid_image_error,
@@ -419,7 +419,7 @@ def test_responses_unknown_items_is_not_retried():
     That payload is deterministic — retrying it sleeps the budget."""
     from litellm.exceptions import APIConnectionError as LiteLLMAPIConnectionError
 
-    from harbor_proximus.llm import (
+    from openworld_harness.llm import (
         ProviderRetryBudgetError,
         _is_retryable,
         is_responses_unknown_item_error,
@@ -471,7 +471,7 @@ def test_reasoning_only_responses_output_keeps_encrypted_cot():
     )
     from openai.types.responses import ResponseReasoningItem
 
-    import harbor_proximus.llm as llm_mod
+    import openworld_harness.llm as llm_mod
 
     llm_mod._install_litellm_reasoning_only_patch()
 
@@ -520,7 +520,7 @@ def test_reasoning_only_responses_output_keeps_encrypted_cot():
 
 @pytest.mark.asyncio
 async def test_invalid_image_bad_request_is_typed_on_first_attempt(monkeypatch):
-    from harbor_proximus.llm import InvalidImageError
+    from openworld_harness.llm import InvalidImageError
 
     llm = _llm()
     calls = {"n": 0}
@@ -550,7 +550,7 @@ async def test_raw_gateway_413_is_typed_and_not_retried(monkeypatch):
     as RequestTooLargeError on the FIRST attempt (the agent loop's eviction
     recovery depends on the type; retrying burns budget on a deterministic
     failure)."""
-    from harbor_proximus.llm import RequestTooLargeError
+    from openworld_harness.llm import RequestTooLargeError
 
     llm = _llm()
     calls = {"n": 0}
@@ -570,7 +570,7 @@ async def test_raw_gateway_413_is_typed_and_not_retried(monkeypatch):
 
 
 def test_moonshot_image_suspension_match_is_narrow():
-    from harbor_proximus.llm import (
+    from openworld_harness.llm import (
         _is_retryable,
         is_transient_image_account_error,
     )
@@ -593,7 +593,7 @@ def test_mismapped_google_quota_429_is_retried():
     (the retryDelay string "14.403979925s" contains "403" and its generic
     403 branch fires first). Quota pressure is what the jittered retry is
     FOR — these must not fail fast like real BadRequests."""
-    from harbor_proximus.llm import _is_retryable
+    from openworld_harness.llm import _is_retryable
 
     quota = LiteLLMBadRequestError(
         message=(
@@ -620,7 +620,7 @@ def test_cancellation_is_never_retried():
     inside a tenacity retry sleep, skipping auto-submission and the restore."""
     import asyncio
 
-    from harbor_proximus.llm import _is_retryable
+    from openworld_harness.llm import _is_retryable
 
     assert _is_retryable(asyncio.CancelledError()) is False
     assert _is_retryable(GeneratorExit()) is False

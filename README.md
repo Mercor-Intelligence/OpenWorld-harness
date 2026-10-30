@@ -1,22 +1,31 @@
-# Proximus
+# OpenWorld-harness
 
-Proximus is a coding agent for long-horizon tasks, packaged as an external agent
+OpenWorld-harness is a fork of [Proximus](https://github.com/Proximal-Labs/proximus)
+by Proximal AI, modified by Mercor; it is the agent harness of the RWE eval
+platform. It is a coding agent for long-horizon tasks, packaged as an external agent
 for [Harbor](https://pypi.org/project/harbor/). It runs a LiteLLM tool loop on the
 orchestrator host and acts in the sandbox only through Harbor's environment
 interface, so it works with any Harbor environment (Docker, Modal, ...).
 
-Status: alpha (`0.1.0a1`), for Harbor `0.23.0`.
+Status: `0.2.0`, for Harbor `0.23.0`. "Proximus" below names the upstream design
+this harness keeps; the model-facing prompts still call the agent Proximus.
+
+## Changes from Proximus
+
+- Renamed: package `openworld_harness`, agent `openworld_harness:OpenWorldHarness`
+  (Harbor name `openworld-harness`), task table `[agent.openworld]` (a task's
+  `[agent.proximus]` table is still read).
 
 ## Install and run
 
 ```sh
-uv pip install "harbor-proximus @ git+https://github.com/Proximal-Labs/proximus"   # next to Harbor
-harbor run ... --agent harbor_proximus:Proximus --model anthropic/claude-opus-5 \
+uv pip install "openworld-harness @ git+https://github.com/mercor-code-envs/OpenWorld-harness"   # next to Harbor
+harbor run ... --agent openworld_harness:OpenWorldHarness --model anthropic/claude-opus-5 \
   --ak time_budget_sec=7200
 ```
 
 [examples/agent.yaml](examples/agent.yaml) shows a job-config fragment.
-`harbor agent schema harbor_proximus:Proximus` lists every option.
+`harbor agent schema openworld_harness:OpenWorldHarness` lists every option.
 
 ## How it works
 
@@ -67,9 +76,9 @@ For deeper changes, subclass the agent and select it with
 `--agent mypkg.module:MyProximus`:
 
 ```python
-from harbor_proximus import Proximus, tools
+from openworld_harness import OpenWorldHarness, tools
 
-class MyProximus(Proximus):
+class MyProximus(OpenWorldHarness):
     def system_prompt(self) -> str:
         return super().system_prompt() + "\n\nPrefer small commits."
 
@@ -91,37 +100,22 @@ instruction, not `initial_message()`.
 ## Task configuration
 
 Tasks can declare options in `task.toml`. Harbor ignores these tables, so a runner
-reads them with `harbor_proximus.task_agent_kwargs(task_dir, model, overrides,
-defaults)` and sets the hard timeout to `harbor_proximus.hard_timeout_sec(kwargs)`:
+reads them with `openworld_harness.task_agent_kwargs(task_dir, model, overrides,
+defaults)` and sets the hard timeout to `openworld_harness.hard_timeout_sec(kwargs)`:
 
 ```toml
-[agent.proximus]
+[agent.openworld]
 task_provides_timer = true
 
-[agent.proximus.models."anthropic/claude-opus-5"]
+[agent.openworld.models."anthropic/claude-opus-5"]
 reasoning_effort = "max"
 ```
 
-Later layers win: defaults, `[agent.proximus]`, the run's model table, overrides.
+Later layers win: defaults, `[agent.openworld]` (or `[agent.proximus]`), the run's
+model table, overrides.
 `time_budget_sec` defaults to `[agent].timeout_sec`, relative template paths are
 task-relative, and `workspace_git_excludes` defaults to the task's `/app` artifact
 excludes. Invalid options raise `ValueError` before any sandbox starts.
-
-## Run on FrontierSWE v2
-
-[px-eval](https://github.com/Proximal-Labs/px-eval) is a thin runner for
-FrontierSWE v2 that supports Proximus. It reads each task's `[agent.proximus]` table,
-sets the hard timeout from `hard_timeout_sec`, and grades the runs later in clean
-verifier sandboxes:
-
-```sh
-uv run python examples/frontier_swe_v2/rollout.py /path/to/frontier-swe-v2/tasks \
-  --environment environment.yaml --agent proximus --model anthropic/claude-opus-5 \
-  --ak time_budget_sec=7200 --ae 'ANTHROPIC_API_KEY=${MY_KEY}'
-```
-
-See its [FrontierSWE v2 guide](https://github.com/Proximal-Labs/px-eval/blob/main/examples/frontier_swe_v2/README.md#run-with-proximus)
-for setup, every option and grading.
 
 ## Limits
 
@@ -140,7 +134,7 @@ uv sync --locked
 uv run pytest -q          # offline: fake providers, temporary Git repos
 uv run --locked ruff check src tests scripts
 uv run --locked ruff format --check src tests scripts
-uv build && uv run python scripts/verify_wheel.py dist/harbor_proximus-0.1.0a1-py3-none-any.whl
+uv build && uv run python scripts/verify_wheel.py dist/openworld_harness-0.2.0-py3-none-any.whl
 ```
 
 `verify_wheel.py` reruns the suite against the installed wheel outside the

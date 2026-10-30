@@ -1,10 +1,11 @@
-"""Proximus, a long-horizon coding agent for Harbor."""
+"""OpenWorld-harness, a long-horizon coding agent for Harbor (fork of Proximus)."""
 
 from importlib import import_module
 from typing import Any
 
 # Exported lazily, so importing the package stays cheap and offline.
 _EXPORTS = {
+    "OpenWorldHarness": "agent",
     "Proximus": "proximus",
     "task_agent_kwargs": "task_config",
     "hard_timeout_sec": "task_config",

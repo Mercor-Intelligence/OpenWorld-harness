@@ -349,7 +349,7 @@ async def test_list_submissions_shows_store_rows_and_winner(tmp_path, monkeypatc
 def _make_submissions(tmp_path, env):
     import logging
 
-    from harbor_proximus.submissions import Submissions
+    from openworld_harness.submissions import Submissions
 
     return Submissions(
         tmp_path,
@@ -479,7 +479,7 @@ async def test_run_end_without_submit_auto_pins_final_state(tmp_path, monkeypatc
     then budget exhaustion) still leaves its last workspace state on the
     submissions rail — recorded via the exact argless submit() path, flagged
     ``auto`` in submissions.jsonl, winner for the exit restore."""
-    from harbor_proximus.proximus import EMPTY_TURN_STALL_LIMIT
+    from openworld_harness.proximus import EMPTY_TURN_STALL_LIMIT
     from tests.test_proximus_loop import empty_response
 
     fake = FakeCompletion(
@@ -529,7 +529,7 @@ async def test_ensure_git_threads_workspace_excludes(tmp_path):
     paths anyway, so tracking them would only bloat every submission."""
     import logging
 
-    from harbor_proximus.submissions import Submissions
+    from openworld_harness.submissions import Submissions
 
     env = GitEnv()
     store = Submissions(

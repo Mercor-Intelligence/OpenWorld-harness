@@ -3,7 +3,7 @@
 import litellm
 import pytest
 
-from harbor_proximus import Proximus
+from openworld_harness import OpenWorldHarness
 
 
 @pytest.mark.parametrize("output_limit", [1024, 500_000])
@@ -13,7 +13,7 @@ def test_context_uses_only_input_limit(tmp_path, monkeypatch, output_limit):
         "get_model_info",
         lambda model: {"max_input_tokens": 32000, "max_tokens": output_limit},
     )
-    agent = Proximus(logs_dir=tmp_path, model_name="openai/context-test")
+    agent = OpenWorldHarness(logs_dir=tmp_path, model_name="openai/context-test")
     assert agent._context_limit == 32000
 
 
@@ -27,7 +27,7 @@ def test_invalid_input_limit_fails_at_construction(tmp_path, monkeypatch, limit)
     with pytest.raises(
         ValueError, match=r"No valid max_input_tokens for 'openai/context-test'\."
     ):
-        Proximus(logs_dir=tmp_path, model_name="openai/context-test")
+        OpenWorldHarness(logs_dir=tmp_path, model_name="openai/context-test")
 
 
 def test_missing_input_limit_does_not_use_max_tokens(tmp_path, monkeypatch):
@@ -37,7 +37,7 @@ def test_missing_input_limit_does_not_use_max_tokens(tmp_path, monkeypatch):
     with pytest.raises(
         ValueError, match=r"No valid max_input_tokens for 'openai/context-test'\."
     ):
-        Proximus(logs_dir=tmp_path, model_name="openai/context-test")
+        OpenWorldHarness(logs_dir=tmp_path, model_name="openai/context-test")
 
 
 def test_registry_error_identifies_model_and_preserves_cause(tmp_path, monkeypatch):
@@ -50,17 +50,17 @@ def test_registry_error_identifies_model_and_preserves_cause(tmp_path, monkeypat
     with pytest.raises(
         ValueError, match=r"No valid max_input_tokens for 'openai/context-test'\."
     ) as exc:
-        Proximus(logs_dir=tmp_path, model_name="openai/context-test")
+        OpenWorldHarness(logs_dir=tmp_path, model_name="openai/context-test")
     assert exc.value.__cause__ is error
 
 
 def test_unknown_model_requires_explicit_input_limit(tmp_path):
     model = "openai/proximus-unregistered-context-test"
     with pytest.raises(ValueError, match="No valid max_input_tokens") as exc:
-        Proximus(logs_dir=tmp_path, model_name=model)
+        OpenWorldHarness(logs_dir=tmp_path, model_name=model)
     assert model in str(exc.value)
 
-    agent = Proximus(
+    agent = OpenWorldHarness(
         logs_dir=tmp_path,
         model_name=model,
         model_info={"max_input_tokens": 64000},

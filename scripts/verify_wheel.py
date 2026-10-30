@@ -1,7 +1,7 @@
 """Install a built wheel outside the source tree and run its offline suite.
 
-Usage: python scripts/verify_wheel.py dist/harbor_proximus-*.whl
-       python scripts/verify_wheel.py dist/harbor_proximus-*.whl --litellm-version 1.97.0
+Usage: python scripts/verify_wheel.py dist/openworld_harness-*.whl
+       python scripts/verify_wheel.py dist/openworld_harness-*.whl --litellm-version 1.97.0
 
 Dependencies are installed from the network/cache, constrained to the versions in
 uv.lock (litellm is left out of the constraints when --litellm-version is given).
@@ -77,7 +77,7 @@ def main() -> None:
             [
                 str(python),
                 "-c",
-                "import harbor_proximus; from pathlib import Path; import sys; assert Path(harbor_proximus.__file__).is_relative_to(Path(sys.prefix)); print('Installed package:', harbor_proximus.__file__)",
+                "import openworld_harness; from pathlib import Path; import sys; assert Path(openworld_harness.__file__).is_relative_to(Path(sys.prefix)); print('Installed package:', openworld_harness.__file__)",
             ],
             cwd=workdir,
             env=test_env,

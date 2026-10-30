@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 from harbor.models.task.config import TaskConfig
 
-from harbor_proximus import task_agent_kwargs
+from openworld_harness import task_agent_kwargs
 
 TOML = """
 [agent]
@@ -41,6 +41,20 @@ def test_task_table_and_budget_default(tmp_path):
         "llm_call_kwargs": {"extra_body": {"a": 1, "b": 2}},
         "time_budget_sec": 7200.0,
     }
+
+
+def test_openworld_table_reads_like_the_legacy_one(tmp_path):
+    legacy = task_agent_kwargs(task(tmp_path), "anthropic/claude-opus-5")
+    renamed = TOML.replace("[agent.proximus", "[agent.openworld")
+    assert task_agent_kwargs(task(tmp_path, renamed), "anthropic/claude-opus-5") == (
+        legacy
+    )
+
+
+def test_both_tables_are_rejected(tmp_path):
+    text = TOML + '\n[agent.openworld]\nreasoning_effort = "low"\n'
+    with pytest.raises(ValueError, match="not both"):
+        task_agent_kwargs(task(tmp_path, text), "m")
 
 
 def test_model_table_then_overrides_win_per_nested_key(tmp_path):

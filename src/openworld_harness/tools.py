@@ -9,8 +9,8 @@ from typing import Any
 from harbor.environments.base import BaseEnvironment
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-import harbor_proximus.images as images
-from harbor_proximus.config import BUDGET_MARGIN_SEC
+import openworld_harness.images as images
+from openworld_harness.config import BUDGET_MARGIN_SEC
 
 
 class EnvironmentGoneError(RuntimeError):

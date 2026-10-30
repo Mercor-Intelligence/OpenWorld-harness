@@ -8,12 +8,12 @@ from pathlib import Path
 import pytest
 from harbor.environments.base import ExecResult
 
-from harbor_proximus.submissions import (
+from openworld_harness.submissions import (
     DEFAULT_SUBMISSION_TIMEOUT_SEC,
     SubmissionError,
     Submissions,
 )
-from harbor_proximus.tools import EnvironmentGoneError
+from openworld_harness.tools import EnvironmentGoneError
 
 pytestmark = pytest.mark.unit
 

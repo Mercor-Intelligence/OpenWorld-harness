@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from harbor.environments.base import ExecResult
 
-from harbor_proximus.tools import (
+from openworld_harness.tools import (
     BASH_DESCRIPTION,
     DEFAULT_TIMEOUT_SEC,
     EXEC_ENV,
@@ -242,7 +242,7 @@ class TestBash:
             return value
 
         monkeypatch.setattr(
-            "harbor_proximus.tools.time",
+            "openworld_harness.tools.time",
             type("T", (), {"monotonic": staticmethod(fake_monotonic)}),
         )
         env = FakeEnv([ExecResult(stdout="partial", stderr=None, return_code=-1)])
@@ -493,7 +493,7 @@ class TestViewImage:
         assert "call view_image again" in result.content
 
     async def test_encoded_byte_ceiling_enforced(self, monkeypatch):
-        from harbor_proximus import images
+        from openworld_harness import images
 
         monkeypatch.setattr(images, "MAX_ENCODED_BYTES", 64)
         env = FakeEnv()

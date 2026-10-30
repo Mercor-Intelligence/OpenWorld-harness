@@ -8,7 +8,7 @@ from harbor.llms.base import ContextLengthExceededError
 from harbor.models.agent.context import AgentContext
 from pydantic import BaseModel
 
-from harbor_proximus import Proximus, prompts, tools
+from openworld_harness import OpenWorldHarness, prompts, tools
 from tests.test_proximus_loop import (
     FakeCompletion,
     FakeEnv,
@@ -25,7 +25,7 @@ from tests.test_proximus_loop import (
 )
 
 
-def tool_names(agent: Proximus) -> list[str]:
+def tool_names(agent: OpenWorldHarness) -> list[str]:
     return [schema["function"]["name"] for schema in agent._tool_schemas]
 
 
@@ -95,7 +95,7 @@ async def test_prompt_template_wraps_the_instruction(tmp_path, monkeypatch):
 async def test_llm_shorthands_and_llm_call_kwargs_win(tmp_path, monkeypatch):
     fake = FakeCompletion(finish_responses())
     monkeypatch.setattr(litellm, "acompletion", fake)
-    agent = Proximus(
+    agent = OpenWorldHarness(
         logs_dir=tmp_path / "logs",
         model_name="anthropic/claude-test",
         temperature=0.2,
@@ -126,7 +126,7 @@ async def test_thinking_budget_model_names(
 ):
     fake = FakeCompletion(finish_responses())
     monkeypatch.setattr(litellm, "acompletion", fake)
-    agent = Proximus(
+    agent = OpenWorldHarness(
         logs_dir=tmp_path / "logs",
         model_name=model_name,
         max_thinking_tokens=2048,
@@ -144,7 +144,7 @@ class CountArgs(BaseModel):
     path: str
 
 
-class CustomProximus(Proximus):
+class CustomProximus(OpenWorldHarness):
     def system_prompt(self) -> str:
         return super().system_prompt() + "\n\nPrefer small commits."
 

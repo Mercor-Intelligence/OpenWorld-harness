@@ -13,15 +13,15 @@ from harbor.agents.factory import AgentFactory
 from harbor.models.agent.context import AgentContext
 from harbor.models.trial.config import AgentConfig
 
-from harbor_proximus import Proximus, utils
+from openworld_harness import OpenWorldHarness, utils
 from tests.test_proximus_loop import FakeCompletion, FakeEnv, finish_responses
 
 
 @pytest.mark.parametrize(
     "selector",
     [
-        {"import_path": "harbor_proximus:Proximus"},
-        {"name": "harbor_proximus:Proximus"},
+        {"import_path": "openworld_harness:OpenWorldHarness"},
+        {"name": "openworld_harness:OpenWorldHarness"},
     ],
 )
 async def test_factory_run_and_artifacts(tmp_path, monkeypatch, selector):
@@ -39,7 +39,7 @@ async def test_factory_run_and_artifacts(tmp_path, monkeypatch, selector):
         logs_dir=tmp_path / "logs",
         environment_logs_dir=PurePosixPath("/logs/custom-agent"),
     )
-    assert isinstance(agent, Proximus)
+    assert isinstance(agent, OpenWorldHarness)
     assert agent.config.time_budget_sec == 600
     assert agent.environment_logs_dir == PurePosixPath("/logs/custom-agent")
     assert agent.options is agent.config
@@ -61,16 +61,16 @@ async def test_factory_run_and_artifacts(tmp_path, monkeypatch, selector):
     assert (agent.logs_dir / "messages.json").is_file()
     trajectory = json.loads((agent.logs_dir / "trajectory.json").read_text())
     assert trajectory["agent"]["version"] == importlib.metadata.version(
-        "harbor-proximus"
+        "openworld-harness"
     )
     assert agent.capabilities.atif
 
 
 def test_preflight_validates_agent_options():
-    Proximus.preflight({"time_budget_sec": 600})
+    OpenWorldHarness.preflight({"time_budget_sec": 600})
     with pytest.raises(ValueError, match="Unknown option 'unsupported'"):
-        Proximus.preflight({"unsupported": True})
-    schema = Proximus.options_schema()
+        OpenWorldHarness.preflight({"unsupported": True})
+    schema = OpenWorldHarness.options_schema()
     assert "time_budget_sec" in schema["properties"]
 
 
@@ -98,7 +98,7 @@ def test_user_registry_controls_context_and_vision(tmp_path):
         "input_cost_per_token": 0.000001,
         "output_cost_per_token": 0.000002,
     }
-    agent = Proximus(
+    agent = OpenWorldHarness(
         logs_dir=tmp_path,
         model_name=model,
         litellm_model_info={model: entry, model.split("/", 1)[1]: entry},
@@ -113,7 +113,7 @@ def test_host_credentials_from_harbor_agent_env(tmp_path, monkeypatch):
     monkeypatch.setenv("PROXIMUS_TEST_KEY", "host-key")
     agent = AgentFactory.create_agent_from_config(
         AgentConfig(
-            import_path="harbor_proximus:Proximus",
+            import_path="openworld_harness:OpenWorldHarness",
             model_name="openai/test-model",
             env={"PROXIMUS_TEST_KEY": "configured-key"},
             kwargs={"api_key_env": "PROXIMUS_TEST_KEY"},
@@ -130,7 +130,7 @@ def test_provider_credentials_follow_harbor_agent_env(tmp_path, monkeypatch):
     def make(env):
         return AgentFactory.create_agent_from_config(
             AgentConfig(
-                import_path="harbor_proximus:Proximus",
+                import_path="openworld_harness:OpenWorldHarness",
                 model_name="anthropic/test-model",
                 env=env,
             ),
@@ -147,7 +147,7 @@ def test_provider_credentials_follow_harbor_agent_env(tmp_path, monkeypatch):
 
 
 def test_options_are_described_in_the_harbor_schema():
-    fields = Proximus.options_model.model_json_schema()["properties"]
+    fields = OpenWorldHarness.options_model.model_json_schema()["properties"]
     assert all(field.get("description") for field in fields.values())
 
 
@@ -162,10 +162,10 @@ import litellm
 from litellm.completion_extras.litellm_responses_transformation.transformation import LiteLLMResponsesTransformationHandler as Handler
 original = Handler._convert_response_output_to_choices
 registry_size = len(litellm.model_cost)
-from harbor_proximus import Proximus
+from openworld_harness import OpenWorldHarness
 assert Handler._convert_response_output_to_choices is original
 assert len(litellm.model_cost) == registry_size
-assert Proximus.name() == 'proximus'
+assert OpenWorldHarness.name() == 'openworld-harness'
 """
     subprocess.run(
         [sys.executable, "-c", script],
@@ -181,7 +181,7 @@ assert Proximus.name() == 'proximus'
 def _agent(tmp_path, model, env, **kwargs):
     return AgentFactory.create_agent_from_config(
         AgentConfig(
-            import_path="harbor_proximus:Proximus",
+            import_path="openworld_harness:OpenWorldHarness",
             model_name=model,
             env=env,
             kwargs=kwargs,
@@ -247,7 +247,7 @@ def test_model_info_keeps_known_bare_names(tmp_path):
 
 
 def test_resolve_credentials_unit():
-    from harbor_proximus.llm import resolve_credentials
+    from openworld_harness.llm import resolve_credentials
 
     env = {"OPENAI_API_KEY": "k", "OPENAI_BASE_URL": "https://gw"}
     plain = resolve_credentials("openai/m", None, env)

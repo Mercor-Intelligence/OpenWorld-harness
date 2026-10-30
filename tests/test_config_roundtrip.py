@@ -15,8 +15,8 @@ from harbor.agents.factory import AgentFactory
 from harbor.cli.utils import parse_kwargs
 from harbor.models.trial.config import AgentConfig
 
-from harbor_proximus import Proximus, task_agent_kwargs
-from harbor_proximus.config import ProximusConfig
+from openworld_harness import OpenWorldHarness, task_agent_kwargs
+from openworld_harness.config import ProximusConfig
 
 MODEL = "openai/gpt-test"
 # Optional: the tasks/ directory of a FrontierSWE v2 checkout.
@@ -61,7 +61,9 @@ def write_task(task_dir: Path, table: dict[str, Any], header: str = "") -> Path:
 def make_agent(kwargs: dict[str, Any], logs_dir: Path):
     return AgentFactory.create_agent_from_config(
         AgentConfig(
-            import_path="harbor_proximus:Proximus", model_name=MODEL, kwargs=kwargs
+            import_path="openworld_harness:OpenWorldHarness",
+            model_name=MODEL,
+            kwargs=kwargs,
         ),
         logs_dir=logs_dir,
     )
@@ -223,7 +225,9 @@ def test_missing_template_fails_before_any_sandbox(tmp_path):
 def test_template_without_instruction_fails_at_preflight(tmp_path):
     (tmp_path / "prompt.j2").write_text("no placeholder here")
     with pytest.raises(ValueError):
-        Proximus.parse_options({"prompt_template_path": str(tmp_path / "prompt.j2")})
+        OpenWorldHarness.parse_options(
+            {"prompt_template_path": str(tmp_path / "prompt.j2")}
+        )
 
 
 def test_thinking_controls_are_exclusive(tmp_path):

@@ -14,8 +14,8 @@ from harbor.models.agent.context import AgentContext
 from harbor.models.task.config import NetworkMode, NetworkPolicy
 from harbor.models.trial.config import AgentConfig
 
-from harbor_proximus import Proximus
-from harbor_proximus.prompts import (
+from openworld_harness import OpenWorldHarness
+from openworld_harness.prompts import (
     CONTINUE_MESSAGE,
     EMPTY_RESPONSE_MESSAGE,
     OUTPUT_LENGTH_MESSAGE,
@@ -24,8 +24,8 @@ from harbor_proximus.prompts import (
     TASK_TIMER_GUIDANCE,
     fmt_duration,
 )
-from harbor_proximus.timer import DEADLINE_PATH, write_deadline
-from harbor_proximus.tools import EnvironmentGoneError
+from openworld_harness.timer import DEADLINE_PATH, write_deadline
+from openworld_harness.tools import EnvironmentGoneError
 
 pytestmark = pytest.mark.unit
 
@@ -193,19 +193,19 @@ class FakeCompletion:
         return item
 
 
-def make_bridged_agent(tmp_path, **kwargs) -> Proximus:
+def make_bridged_agent(tmp_path, **kwargs) -> OpenWorldHarness:
     """An agent whose model actually satisfies litellm's chat->Responses
     bridge gate (OpenAI, gpt-5.4+, reasoning_effort, tools)."""
     kwargs.setdefault("reasoning_effort", "xhigh")
-    return Proximus(
+    return OpenWorldHarness(
         logs_dir=tmp_path / "logs",
         model_name="openai/gpt-5.4",
         **kwargs,
     )
 
 
-def make_agent(tmp_path, **kwargs) -> Proximus:
-    return Proximus(
+def make_agent(tmp_path, **kwargs) -> OpenWorldHarness:
+    return OpenWorldHarness(
         logs_dir=tmp_path / "logs",
         model_name="openai/gpt-test",
         **kwargs,
@@ -221,22 +221,22 @@ def small_context(monkeypatch, limit: int = 1000) -> None:
     )
 
 
-def read_trajectory(agent: Proximus) -> dict:
+def read_trajectory(agent: OpenWorldHarness) -> dict:
     return json.loads((agent.logs_dir / "trajectory.json").read_text())
 
 
-def read_messages(agent: Proximus) -> list[dict]:
+def read_messages(agent: OpenWorldHarness) -> list[dict]:
     return json.loads((agent.logs_dir / "messages.json").read_text())
 
 
 def test_proximus_loads_through_custom_agent_factory():
-    config = AgentConfig(import_path="harbor_proximus:Proximus")
-    assert AgentFactory.get_agent_class_from_config(config) is Proximus
+    config = AgentConfig(import_path="openworld_harness:OpenWorldHarness")
+    assert AgentFactory.get_agent_class_from_config(config) is OpenWorldHarness
 
 
 def test_requires_model_name(tmp_path):
     with pytest.raises(ValueError, match="model_name"):
-        Proximus(logs_dir=tmp_path)
+        OpenWorldHarness(logs_dir=tmp_path)
 
 
 @pytest.mark.parametrize(
@@ -596,7 +596,7 @@ async def test_time_budget_exhausted_ends_run_without_querying(tmp_path, monkeyp
     # the run before any LLM call is made (FakeCompletion would raise if hit).
     fake = FakeCompletion([])
     monkeypatch.setattr(litellm, "acompletion", fake)
-    monkeypatch.setattr(Proximus, "_elapsed", lambda self: 4000.0)
+    monkeypatch.setattr(OpenWorldHarness, "_elapsed", lambda self: 4000.0)
 
     agent = make_agent(tmp_path, time_budget_sec=3600)
     context = AgentContext()
@@ -712,7 +712,7 @@ def empty_response() -> FakeResponse:
 
 
 async def test_consecutive_empty_turns_end_the_run(tmp_path, monkeypatch):
-    from harbor_proximus.proximus import EMPTY_TURN_STALL_LIMIT
+    from openworld_harness.proximus import EMPTY_TURN_STALL_LIMIT
 
     # Exactly the limit is queued: FakeCompletion would raise on one more.
     fake = FakeCompletion([empty_response() for _ in range(EMPTY_TURN_STALL_LIMIT)])
@@ -1115,7 +1115,9 @@ async def test_time_budget_ends_run_mid_stream(tmp_path, monkeypatch):
     # third does not, so exactly two LLM calls are made.
     fake = FakeCompletion([bash_response("echo 1"), bash_response("echo 2")])
     monkeypatch.setattr(litellm, "acompletion", fake)
-    monkeypatch.setattr(Proximus, "_elapsed", lambda self: self._run.n_turns * 1500.0)
+    monkeypatch.setattr(
+        OpenWorldHarness, "_elapsed", lambda self: self._run.n_turns * 1500.0
+    )
 
     agent = make_agent(tmp_path, time_budget_sec=3600)
     context = AgentContext()
@@ -1520,7 +1522,9 @@ def test_cache_breakpoints_use_the_1h_ttl(tmp_path):
     message hosts it as a top-level ``cache_control`` key (the one litellm
     reads) rather than inside ``content``, so this counts both shapes.
     """
-    agent = Proximus(logs_dir=tmp_path / "logs", model_name="anthropic/claude-opus-5")
+    agent = OpenWorldHarness(
+        logs_dir=tmp_path / "logs", model_name="anthropic/claude-opus-5"
+    )
     wire = agent._llm._apply_prompt_caching(  # type: ignore[attr-defined]
         [
             {"role": "system", "content": "sys"},
@@ -1547,7 +1551,7 @@ def test_non_anthropic_models_are_not_tagged(tmp_path):
     """OpenAI caches automatically and exposes no TTL control -- litellm lists
     no cache_creation_input_token_cost_above_1hr for it, and its automatic
     caching already reaches high hit rates untouched."""
-    agent = Proximus(logs_dir=tmp_path / "logs", model_name="openai/gpt-test")
+    agent = OpenWorldHarness(logs_dir=tmp_path / "logs", model_name="openai/gpt-test")
     msgs = [{"role": "system", "content": "sys"}, {"role": "user", "content": "u"}]
     assert agent._llm._apply_prompt_caching(msgs) is msgs  # type: ignore[attr-defined]
 
@@ -1626,7 +1630,7 @@ async def test_chat_reasoning_content_round_trip(tmp_path, monkeypatch, model_na
     fake = FakeCompletion([first, *finish_responses()])
     monkeypatch.setattr(litellm, "acompletion", fake)
 
-    agent = Proximus(
+    agent = OpenWorldHarness(
         logs_dir=tmp_path / "logs",
         model_name=model_name,
         api_key_env=None,
@@ -1655,7 +1659,7 @@ async def test_gemini_thought_signature_round_trip(tmp_path, monkeypatch):
     fake = FakeCompletion([first, *finish_responses()])
     monkeypatch.setattr(litellm, "acompletion", fake)
 
-    agent = Proximus(
+    agent = OpenWorldHarness(
         logs_dir=tmp_path / "logs",
         model_name="gemini/test-model",
         api_key_env=None,
@@ -1672,7 +1676,7 @@ async def test_anthropic_gets_no_reasoning_items_or_extra_body(tmp_path, monkeyp
     fake = FakeCompletion(finish_responses())
     monkeypatch.setattr(litellm, "acompletion", fake)
 
-    agent = Proximus(
+    agent = OpenWorldHarness(
         logs_dir=tmp_path / "logs",
         model_name="anthropic/claude-opus-test",
         reasoning_effort="high",
@@ -1766,7 +1770,7 @@ async def test_xai_responses_request_keeps_system(tmp_path, monkeypatch):
         },
     )
 
-    agent = Proximus(
+    agent = OpenWorldHarness(
         logs_dir=tmp_path / "logs",
         model_name="xai/grok-test-model",
         reasoning_effort="high",
@@ -1858,7 +1862,7 @@ async def test_bare_thinking_turn_is_not_replayed(tmp_path, monkeypatch):
     fake = FakeCompletion([bare, working, *finish_responses()])
     monkeypatch.setattr(litellm, "acompletion", fake)
 
-    agent = Proximus(
+    agent = OpenWorldHarness(
         logs_dir=tmp_path / "logs",
         model_name="anthropic/claude-opus-test",
         reasoning_effort="high",
@@ -1999,7 +2003,7 @@ async def test_env_gone_mid_batch_fills_remaining_results(tmp_path, monkeypatch)
 
 
 def test_drop_orphan_tool_results_enforces_pairing():
-    from harbor_proximus.llm import drop_orphan_tool_results
+    from openworld_harness.llm import drop_orphan_tool_results
 
     asst = {
         "role": "assistant",
@@ -2102,7 +2106,7 @@ async def test_request_too_large_evicts_newest_image_and_retries(tmp_path, monke
     # NEWEST attached image — least prompt cache busted, and it is the image
     # the model can re-view compressed — relays the provider error verbatim,
     # and the run continues. The older image survives untouched.
-    from harbor_proximus.prompts import REQUEST_TOO_LARGE_MESSAGE
+    from openworld_harness.prompts import REQUEST_TOO_LARGE_MESSAGE
 
     view1 = FakeResponse(
         FakeMessage(
@@ -2181,7 +2185,7 @@ async def test_request_too_large_evicts_newest_image_and_retries(tmp_path, monke
 async def test_invalid_image_is_removed_and_error_returned_to_model(
     tmp_path, monkeypatch
 ):
-    from harbor_proximus.prompts import INVALID_IMAGE_MESSAGE
+    from openworld_harness.prompts import INVALID_IMAGE_MESSAGE
 
     view = FakeResponse(
         FakeMessage(
@@ -2317,7 +2321,7 @@ async def test_image_count_limit_compacts_instead_of_repeated_eviction(
 async def test_request_too_large_without_images_is_fatal(tmp_path, monkeypatch):
     # Nothing evictable means nothing recoverable — the typed error
     # propagates instead of looping forever.
-    from harbor_proximus import llm as llm_mod
+    from openworld_harness import llm as llm_mod
 
     fake = FakeCompletion(
         [RuntimeError("Request body size exceeds maximum allowed size: 10485760 bytes")]
@@ -2335,7 +2339,7 @@ async def test_provider_outage_past_budget_fails_the_run(tmp_path, monkeypatch):
     # and the trial FAILS rather than looking like a clean completion.
     import asyncio
 
-    from harbor_proximus import llm as llm_mod
+    from openworld_harness import llm as llm_mod
 
     calls = {"n": 0}
 
@@ -2378,7 +2382,7 @@ async def test_env_gone_skips_restore(tmp_path, monkeypatch):
 
 
 async def test_finalize_only_on_confirmed_submit(tmp_path, monkeypatch):
-    from harbor_proximus.submissions import Submissions
+    from openworld_harness.submissions import Submissions
 
     fake = FakeCompletion(finish_responses())
     monkeypatch.setattr(litellm, "acompletion", fake)
@@ -2396,11 +2400,11 @@ async def test_finalize_only_on_confirmed_submit(tmp_path, monkeypatch):
 
 
 async def test_finalize_only_skips_budget_exit(tmp_path, monkeypatch):
-    from harbor_proximus.submissions import Submissions
+    from openworld_harness.submissions import Submissions
 
     fake = FakeCompletion([])
     monkeypatch.setattr(litellm, "acompletion", fake)
-    monkeypatch.setattr(Proximus, "_elapsed", lambda self: 4000.0)
+    monkeypatch.setattr(OpenWorldHarness, "_elapsed", lambda self: 4000.0)
     restore = AsyncMock(return_value=True)
     monkeypatch.setattr(Submissions, "restore_winner", restore)
     agent = make_agent(

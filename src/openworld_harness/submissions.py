@@ -9,7 +9,7 @@ from typing import Any
 
 from harbor.environments.base import BaseEnvironment
 
-from harbor_proximus import tools, utils
+from openworld_harness import tools, utils
 
 GIT_TIMEOUT_SEC = 60
 DEFAULT_SUBMISSION_TIMEOUT_SEC = 600

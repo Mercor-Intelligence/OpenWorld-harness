@@ -5,8 +5,8 @@ from typing import Any
 
 from harbor.models.task.config import NetworkMode
 
-from harbor_proximus import utils
-from harbor_proximus.timer import DEADLINE_PATH
+from openworld_harness import utils
+from openworld_harness.timer import DEADLINE_PATH
 
 SUMMARY_REQUEST = """Pause the task. Produce a comprehensive handoff summary of your work so far for another agent who will continue without your conversation history. Cover:
 1. Major actions completed and their outcomes.

@@ -1,4 +1,7 @@
-"""Proximus settings declared by a task, under ``[agent.proximus]`` in task.toml.
+"""Agent settings declared by a task, under ``[agent.openworld]`` in task.toml.
+
+``[agent.proximus]``, the table name of the upstream Proximus harness, is read when
+``[agent.openworld]`` is absent; a task may declare only one of them.
 
 Upstream Harbor ignores unknown keys in ``[agent]`` and does not give a custom
 agent its task directory, so the runner reads this table and passes the result
@@ -7,14 +10,14 @@ as ``AgentConfig.kwargs``::
     [agent]
     timeout_sec = 72000.0
 
-    [agent.proximus]
+    [agent.openworld]
     task_provides_timer = true
 
-    [agent.proximus.models."anthropic/claude-opus-5"]
+    [agent.openworld.models."anthropic/claude-opus-5"]
     reasoning_effort = "max"
     api_key_env = "ANTHROPIC_API_KEY"
 
-Layers, later wins: the caller's defaults, ``[agent.proximus]``, the table for
+Layers, later wins: the caller's defaults, the task's table, the table for
 the run's model under ``models``, then the caller's overrides. Nested tables such as
 ``llm_call_kwargs`` merge per key, so overriding one ``extra_body`` field keeps
 the rest. ``time_budget_sec`` defaults to ``[agent].timeout_sec``, a relative
@@ -27,8 +30,8 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-from harbor_proximus.config import ProximusConfig
-from harbor_proximus.submissions import (
+from openworld_harness.config import ProximusConfig
+from openworld_harness.submissions import (
     DEFAULT_SUBMISSION_TIMEOUT_SEC,
     RESTORE_TIMEOUT_SEC,
 )
@@ -36,7 +39,8 @@ from harbor_proximus.submissions import (
 # Slack above the exit auto-submit and restore limits.
 FINALIZE_MARGIN_SEC = 300
 
-TABLE = "proximus"
+TABLE = "openworld"
+LEGACY_TABLE = "proximus"
 
 
 def _merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -82,22 +86,27 @@ def task_agent_kwargs(
     overrides: dict[str, Any] | None = None,
     defaults: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Proximus kwargs for running ``model_name`` on the task in ``task_dir``.
+    """Agent kwargs for running ``model_name`` on the task in ``task_dir``.
 
     Only explicitly set options are returned; everything else keeps the
     ProximusConfig default. Raises ValueError on an unknown or invalid option.
     """
     data = tomllib.loads((Path(task_dir) / "task.toml").read_text())
     agent = data.get("agent") or {}
-    if not isinstance(agent.get(TABLE, {}), dict):
-        raise ValueError(f"[agent.{TABLE}] must be a table")
-    table = dict(agent.get(TABLE) or {})
+    if TABLE in agent and LEGACY_TABLE in agent:
+        raise ValueError(
+            f"{task_dir}: declare [agent.{TABLE}] or [agent.{LEGACY_TABLE}], not both"
+        )
+    name = LEGACY_TABLE if LEGACY_TABLE in agent else TABLE
+    if not isinstance(agent.get(name, {}), dict):
+        raise ValueError(f"[agent.{name}] must be a table")
+    table = dict(agent.get(name) or {})
     models = table.pop("models", {})
     if not isinstance(models, dict):
-        raise ValueError(f"[agent.{TABLE}.models] must be a table of model names")
+        raise ValueError(f"[agent.{name}.models] must be a table of model names")
     model_table = models.get(model_name, {})
     if not isinstance(model_table, dict):
-        raise ValueError(f'[agent.{TABLE}.models."{model_name}"] must be a table')
+        raise ValueError(f'[agent.{name}.models."{model_name}"] must be a table')
 
     # Relative template paths in the task's own tables are task-relative.
     for layer in (table, model_table):
@@ -116,7 +125,7 @@ def task_agent_kwargs(
     try:
         ProximusConfig.model_validate(kwargs)
     except Exception as e:
-        raise ValueError(f"invalid [agent.{TABLE}] in {task_dir}: {e}") from e
+        raise ValueError(f"invalid [agent.{name}] in {task_dir}: {e}") from e
     return kwargs
 
 
