@@ -257,9 +257,7 @@ class Proximus(BaseAgent):
                 continue
             except OutputLengthExceededError:
                 self.logger.debug("Output length exceeded; asking for smaller output.")
-                self._run.messages.append(
-                    {"role": "user", "content": prompts.OUTPUT_LENGTH_MESSAGE}
-                )
+                self._inject_user(prompts.OUTPUT_LENGTH_MESSAGE, "output_length")
                 continue
             except llm.ImageLimitExceededError:
                 # Clear all images to avoid repeatedly hitting the image-count cap.
@@ -284,11 +282,8 @@ class Proximus(BaseAgent):
                     "Provider rejected the newest attached image; removed it "
                     "and informed the model."
                 )
-                self._run.messages.append(
-                    {
-                        "role": "user",
-                        "content": prompts.INVALID_IMAGE_MESSAGE.format(error=e),
-                    }
+                self._inject_user(
+                    prompts.INVALID_IMAGE_MESSAGE.format(error=e), "invalid_image"
                 )
                 continue
             except llm.RequestTooLargeError as e:
@@ -302,12 +297,12 @@ class Proximus(BaseAgent):
                 note = prompts.REQUEST_TOO_LARGE_MESSAGE.format(error=e)
                 # Reuse the recovery note across consecutive failures.
                 last = self._run.messages[-1]
-                if last.get("role") == "user" and str(last.get("content")).startswith(
-                    "Request failed: "
-                ):
-                    last["content"] = note
-                else:
-                    self._run.messages.append({"role": "user", "content": note})
+                self._inject_user(
+                    note,
+                    "request_too_large",
+                    replace_last=last.get("role") == "user"
+                    and str(last.get("content")).startswith("Request failed: "),
+                )
                 continue
             except Exception as e:
                 budget = self.config.time_budget_sec
@@ -337,12 +332,13 @@ class Proximus(BaseAgent):
                     return
 
                 if self._run.submit_armed_turn is not None:
-                    closer = prompts.CONTINUE_OR_CONFIRM_MESSAGE
+                    self._inject_user(
+                        prompts.CONTINUE_OR_CONFIRM_MESSAGE, "continue_or_confirm"
+                    )
                 elif self._run.consecutive_empty_turns > 0:
-                    closer = prompts.EMPTY_RESPONSE_MESSAGE
+                    self._inject_user(prompts.EMPTY_RESPONSE_MESSAGE, "empty_response")
                 else:
-                    closer = prompts.CONTINUE_MESSAGE
-                self._run.messages.append({"role": "user", "content": closer})
+                    self._inject_user(prompts.CONTINUE_MESSAGE, "continue")
                 continue
 
             end_run = await self._execute_tool_calls(parsed)
@@ -852,6 +848,18 @@ class Proximus(BaseAgent):
             "fallback_turns": run.fallback_turns,
             "fallback_models": dict(run.fallback_models),
         }
+
+    def _inject_user(
+        self, content: str, kind: str, *, replace_last: bool = False
+    ) -> None:
+        """Send the model a harness message and record it as a user step, so
+        the trajectory shows everything the model was told. ``replace_last``
+        overwrites the previous message instead of appending one."""
+        if replace_last:
+            self._run.messages[-1]["content"] = content
+        else:
+            self._run.messages.append({"role": "user", "content": content})
+        self._add_step("user", content, extra={"harness_message": kind})
 
     def _add_step(
         self, source: Literal["system", "user", "agent"], message: str, **kwargs: Any

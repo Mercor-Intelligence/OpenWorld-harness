@@ -17,6 +17,7 @@ from harbor.models.trial.config import AgentConfig
 from openworld_harness import OpenWorldHarness
 from openworld_harness.prompts import (
     CONTINUE_MESSAGE,
+    CONTINUE_OR_CONFIRM_MESSAGE,
     EMPTY_RESPONSE_MESSAGE,
     OUTPUT_LENGTH_MESSAGE,
     PROGRESS_FILE,
@@ -789,6 +790,42 @@ async def test_empty_turn_gets_the_directive_closer(tmp_path, monkeypatch):
     # The prose turn keeps "Continue."; every empty one is nagged.
     assert closers.count(CONTINUE_MESSAGE) == 1
     assert closers.count(EMPTY_RESPONSE_MESSAGE) == 3
+
+
+async def test_harness_messages_are_recorded_in_the_trajectory(tmp_path, monkeypatch):
+    """Every message the harness sends the model is a user step tagged with
+    its kind, so a trajectory reader sees what the model was told (H5)."""
+    truncated = text_response("cut off mid-")
+    truncated.choices[0].finish_reason = "length"
+    fake = FakeCompletion(
+        [
+            truncated,
+            text_response("planning"),
+            empty_response(),
+            submit_response(),
+            text_response("one more look"),
+            submit_response(),
+        ]
+    )
+    monkeypatch.setattr(litellm, "acompletion", fake)
+
+    agent = make_agent(tmp_path)
+    await agent.run("Task", FakeEnv(), AgentContext())  # type: ignore[arg-type]
+
+    steps = read_trajectory(agent)["steps"]
+    harness = [
+        (s["message"], s["extra"]["harness_message"])
+        for s in steps
+        if s["source"] == "user" and (s.get("extra") or {}).get("harness_message")
+    ]
+    assert harness == [
+        (OUTPUT_LENGTH_MESSAGE, "output_length"),
+        (CONTINUE_MESSAGE, "continue"),
+        (EMPTY_RESPONSE_MESSAGE, "empty_response"),
+        (CONTINUE_OR_CONFIRM_MESSAGE, "continue_or_confirm"),
+    ]
+    # Each one follows the turn it answers (the truncated turn is dropped).
+    assert "".join(s["source"][0] for s in steps) == "suuauauaaua"
 
 
 async def test_opaque_thinking_blocks_do_not_count_as_empty(tmp_path, monkeypatch):
@@ -2233,6 +2270,12 @@ async def test_request_too_large_evicts_newest_image_and_retries(tmp_path, monke
     assert len(notes) == 1
     assert "10485760" in notes[0]  # the provider's error, verbatim
     assert notes[0] == REQUEST_TOO_LARGE_MESSAGE.format(error=gateway_413)
+    recorded = [
+        s["message"]
+        for s in read_trajectory(agent)["steps"]
+        if (s.get("extra") or {}).get("harness_message") == "request_too_large"
+    ]
+    assert recorded == [notes[0]]
 
 
 async def test_invalid_image_is_removed_and_error_returned_to_model(
