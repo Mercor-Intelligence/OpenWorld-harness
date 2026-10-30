@@ -28,8 +28,8 @@ from litellm.exceptions import (
     ContentPolicyViolationError as LiteLLMContentPolicyViolationError,
 )
 
-from harbor_proximus.config import ProximusConfig
-from harbor_proximus.llm import (
+from openworld_harness.config import ProximusConfig
+from openworld_harness.llm import (
     LLM,
     LLM_RETRY_MAX_WAIT_SEC,
     ParsedResponse,
@@ -165,8 +165,8 @@ async def test_api_key_env_indirection(monkeypatch, tmp_path):
     OpenAI-compatible endpoint onto the single OPENAI_API_KEY)."""
     import litellm
 
-    from harbor_proximus.config import ProximusConfig
-    from harbor_proximus.llm import LLM
+    from openworld_harness.config import ProximusConfig
+    from openworld_harness.llm import LLM
 
     monkeypatch.setenv("META_API_KEY", "sk-meta-test")
     captured: dict = {}
@@ -220,8 +220,8 @@ def test_provider_health_is_atomic_structured_and_redacts_keys(tmp_path):
 
 
 def test_api_key_env_missing_fails_at_construction(monkeypatch):
-    from harbor_proximus.config import ProximusConfig
-    from harbor_proximus.llm import LLM
+    from openworld_harness.config import ProximusConfig
+    from openworld_harness.llm import LLM
 
     monkeypatch.delenv("NOPE_API_KEY", raising=False)
     with pytest.raises(ValueError, match="NOPE_API_KEY"):
@@ -365,7 +365,7 @@ def test_request_too_large_detection_and_no_retry_classification():
     """Body-cap rejections arrive under many guises (a gateway 413 can be a
     RAW AnthropicError, not a litellm class) — detection is message/status
     based, and even an un-converted raw error is never retried."""
-    from harbor_proximus.llm import (
+    from openworld_harness.llm import (
         RequestTooLargeError,
         _is_retryable,
         is_image_limit_error,
@@ -393,7 +393,7 @@ def test_request_too_large_detection_and_no_retry_classification():
 
 
 def test_invalid_image_detection_and_no_retry_classification():
-    from harbor_proximus.llm import (
+    from openworld_harness.llm import (
         InvalidImageError,
         _is_retryable,
         is_invalid_image_error,
@@ -419,7 +419,7 @@ def test_responses_unknown_items_is_not_retried():
     That payload is deterministic — retrying it sleeps the budget."""
     from litellm.exceptions import APIConnectionError as LiteLLMAPIConnectionError
 
-    from harbor_proximus.llm import (
+    from openworld_harness.llm import (
         ProviderRetryBudgetError,
         _is_retryable,
         is_responses_unknown_item_error,
@@ -471,7 +471,7 @@ def test_reasoning_only_responses_output_keeps_encrypted_cot():
     )
     from openai.types.responses import ResponseReasoningItem
 
-    import harbor_proximus.llm as llm_mod
+    import openworld_harness.llm as llm_mod
 
     llm_mod._install_litellm_reasoning_only_patch()
 
@@ -520,7 +520,7 @@ def test_reasoning_only_responses_output_keeps_encrypted_cot():
 
 @pytest.mark.asyncio
 async def test_invalid_image_bad_request_is_typed_on_first_attempt(monkeypatch):
-    from harbor_proximus.llm import InvalidImageError
+    from openworld_harness.llm import InvalidImageError
 
     llm = _llm()
     calls = {"n": 0}
@@ -550,7 +550,7 @@ async def test_raw_gateway_413_is_typed_and_not_retried(monkeypatch):
     as RequestTooLargeError on the FIRST attempt (the agent loop's eviction
     recovery depends on the type; retrying burns budget on a deterministic
     failure)."""
-    from harbor_proximus.llm import RequestTooLargeError
+    from openworld_harness.llm import RequestTooLargeError
 
     llm = _llm()
     calls = {"n": 0}
@@ -570,7 +570,7 @@ async def test_raw_gateway_413_is_typed_and_not_retried(monkeypatch):
 
 
 def test_moonshot_image_suspension_match_is_narrow():
-    from harbor_proximus.llm import (
+    from openworld_harness.llm import (
         _is_retryable,
         is_transient_image_account_error,
     )
@@ -593,7 +593,7 @@ def test_mismapped_google_quota_429_is_retried():
     (the retryDelay string "14.403979925s" contains "403" and its generic
     403 branch fires first). Quota pressure is what the jittered retry is
     FOR — these must not fail fast like real BadRequests."""
-    from harbor_proximus.llm import _is_retryable
+    from openworld_harness.llm import _is_retryable
 
     quota = LiteLLMBadRequestError(
         message=(
@@ -620,8 +620,115 @@ def test_cancellation_is_never_retried():
     inside a tenacity retry sleep, skipping auto-submission and the restore."""
     import asyncio
 
-    from harbor_proximus.llm import _is_retryable
+    from openworld_harness.llm import _is_retryable
 
     assert _is_retryable(asyncio.CancelledError()) is False
     assert _is_retryable(GeneratorExit()) is False
     assert _is_retryable(KeyboardInterrupt()) is False
+
+
+def test_consecutive_reasoning_items_are_all_kept():
+    """LiteLLM kept only the last of consecutive reasoning items, and gpt-6
+    models put the summary in an earlier one (H5)."""
+    from litellm.completion_extras.litellm_responses_transformation.transformation import (
+        LiteLLMResponsesTransformationHandler,
+    )
+    from openai.types.responses import (
+        ResponseFunctionToolCall,
+        ResponseOutputMessage,
+        ResponseOutputText,
+        ResponseReasoningItem,
+    )
+
+    import openworld_harness.llm as llm_mod
+
+    llm_mod._install_litellm_reasoning_only_patch()
+    convert = LiteLLMResponsesTransformationHandler._convert_response_output_to_choices
+    first = ResponseReasoningItem(
+        id="rs_1",
+        type="reasoning",
+        summary=[{"type": "summary_text", "text": "Counting sums of squares."}],
+        encrypted_content="ENC1",
+    )
+    second = ResponseReasoningItem(
+        id="rs_2", type="reasoning", summary=[], encrypted_content="ENC2"
+    )
+    answer = ResponseOutputMessage(
+        id="msg_1",
+        type="message",
+        role="assistant",
+        status="completed",
+        content=[ResponseOutputText(type="output_text", text="113", annotations=[])],
+    )
+    call = ResponseFunctionToolCall(
+        id="fc_1",
+        call_id="call_1",
+        type="function_call",
+        name="bash",
+        arguments='{"command": "ls"}',
+        status="completed",
+    )
+
+    for output, content, n_calls in [
+        ([first, second, answer], "113", 0),
+        ([first, second, call], None, 1),
+    ]:
+        (choice,) = convert(output)
+        message = choice.message
+        assert [i["id"] for i in message.reasoning_items] == ["rs_1", "rs_2"]
+        assert [i["encrypted_content"] for i in message.reasoning_items] == [
+            "ENC1",
+            "ENC2",
+        ]
+        assert message.reasoning_content == "Counting sums of squares."
+        assert (message.content or None) == content
+        assert len(message.tool_calls or []) == n_calls
+
+    # Items LiteLLM already keeps (one per message) are left as they are.
+    (choice,) = convert([first, answer])
+    assert [i["id"] for i in choice.message.reasoning_items] == ["rs_1"]
+
+    # Interleaved with tool calls, replay could not keep their order: the
+    # items stay as LiteLLM left them, and only the summary text is added.
+    other_call = call.model_copy(update={"id": "fc_2", "call_id": "call_2"})
+    (choice,) = convert([first, call, second, other_call])
+    assert [i["id"] for i in choice.message.reasoning_items] == ["rs_2"]
+    assert choice.message.reasoning_content == "Counting sums of squares."
+    assert len(choice.message.tool_calls) == 2
+
+
+def test_a_failing_reasoning_restore_keeps_litellms_choices(monkeypatch, caplog):
+    """The restore is best effort: if it raises, the response must still
+    arrive as LiteLLM converted it, not fail the request."""
+    from litellm.completion_extras.litellm_responses_transformation.transformation import (
+        LiteLLMResponsesTransformationHandler,
+    )
+    from openai.types.responses import (
+        ResponseOutputMessage,
+        ResponseOutputText,
+        ResponseReasoningItem,
+    )
+
+    import openworld_harness.llm as llm_mod
+
+    llm_mod._install_litellm_reasoning_only_patch()
+
+    def broken(choices, output_items):
+        raise TypeError("unexpected summary shape")
+
+    monkeypatch.setattr(llm_mod, "_keep_every_reasoning_item", broken)
+    convert = LiteLLMResponsesTransformationHandler._convert_response_output_to_choices
+    items = [
+        ResponseReasoningItem(id=f"rs_{i}", type="reasoning", summary=[])
+        for i in (1, 2)
+    ]
+    answer = ResponseOutputMessage(
+        id="msg_1",
+        type="message",
+        role="assistant",
+        status="completed",
+        content=[ResponseOutputText(type="output_text", text="113", annotations=[])],
+    )
+    (choice,) = convert([*items, answer])
+    assert choice.message.content == "113"
+    assert "Could not restore the reasoning items" in caplog.text

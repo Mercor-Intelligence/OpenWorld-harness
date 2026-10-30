@@ -1,6 +1,7 @@
 """LiteLLM configuration and transport."""
 
 import copy
+import itertools
 import json
 import logging
 import os
@@ -25,7 +26,7 @@ from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler
 from litellm.llms.openai.chat.gpt_5_transformation import OpenAIGPT5Config
 from litellm.types.utils import ModelResponse
 
-from harbor_proximus.config import BUDGET_MARGIN_SEC, ProximusConfig
+from openworld_harness.config import BUDGET_MARGIN_SEC, ProximusConfig
 
 _MODEL_REGISTRATION_LOCK = threading.Lock()
 
@@ -320,6 +321,15 @@ def _reasoning_item_dict(item: Any) -> dict[str, Any]:
     )
 
 
+def _summary_text(reasoning_items: list[dict[str, Any]]) -> str:
+    return " ".join(
+        str(part.get("text") or "")
+        for item in reasoning_items
+        for part in (item.get("summary") or [])
+        if isinstance(part, dict) and part.get("text")
+    )
+
+
 def _choices_from_reasoning_only_output(output_items: list[Any]) -> list[Any]:
     """A Responses turn that is only reasoning still has a CoT to replay.
 
@@ -332,12 +342,7 @@ def _choices_from_reasoning_only_output(output_items: list[Any]) -> list[Any]:
     from litellm.types.utils import Choices, Message
 
     reasoning_items = [_reasoning_item_dict(item) for item in output_items]
-    summary_text = " ".join(
-        str(part.get("text") or "")
-        for item in reasoning_items
-        for part in (item.get("summary") or [])
-        if isinstance(part, dict) and part.get("text")
-    )
+    summary_text = _summary_text(reasoning_items)
     message = Message(
         role="assistant",
         content="",
@@ -347,8 +352,44 @@ def _choices_from_reasoning_only_output(output_items: list[Any]) -> list[Any]:
     return [Choices(message=message, finish_reason="stop", index=0)]
 
 
+def _keep_every_reasoning_item(choices: list[Any], output_items: list[Any]) -> None:
+    """Put back the reasoning LiteLLM dropped.
+
+    LiteLLM keeps only the last of the reasoning items before a message
+    (tool calls do not flush them). gpt-6 models emit several and summarize
+    in an earlier one, so the summary never reached the trajectory and the
+    earlier items' encrypted CoT was never replayed. Every summary goes into
+    reasoning_content, which is not replayed. The items themselves are put
+    back only when they all lead the output: replay sends a turn's reasoning
+    before its tool calls, which keeps their order only then.
+    """
+    reasoning = [
+        _reasoning_item_dict(item)
+        for item in output_items
+        if _is_reasoning_output_item(item)
+    ]
+    if len(choices) != 1 or len(reasoning) < 2:
+        return
+    message = choices[0].message
+    if len(getattr(message, "reasoning_items", None) or []) >= len(reasoning):
+        return
+    message.reasoning_content = _summary_text(reasoning) or None
+    leading = len(list(itertools.takewhile(_is_reasoning_output_item, output_items)))
+    if leading == len(reasoning):
+        message.reasoning_items = reasoning
+
+
+def _litellm_strips_summary_alias() -> bool:
+    """Whether this litellm removes a reasoning_summary alias from chat-path
+    requests; an older one would send it on, and Chat Completions rejects it."""
+    return hasattr(
+        litellm.utils, "strip_reasoning_summary_aliases_from_optional_params"
+    )
+
+
 def _install_litellm_reasoning_only_patch() -> None:
-    """Accept reasoning-only Responses output so encrypted CoT is not lost."""
+    """Accept reasoning-only Responses output and keep every reasoning item,
+    so neither encrypted CoT nor summaries are lost."""
     try:
         from litellm.completion_extras.litellm_responses_transformation.transformation import (
             LiteLLMResponsesTransformationHandler,
@@ -364,9 +405,16 @@ def _install_litellm_reasoning_only_patch() -> None:
         handle_raw_dict_callback: Callable | None = None,
     ) -> list[Any]:
         choices = orig(output_items, handle_raw_dict_callback=handle_raw_dict_callback)
-        if choices:
-            return choices
         items = list(output_items or [])
+        if choices:
+            try:
+                _keep_every_reasoning_item(choices, items)
+            except Exception:  # best effort: LiteLLM's own choices still stand
+                logging.getLogger(__name__).warning(
+                    "Could not restore the reasoning items LiteLLM dropped.",
+                    exc_info=True,
+                )
+            return choices
         if items and all(_is_reasoning_output_item(item) for item in items):
             return _choices_from_reasoning_only_output(items)
         if not items:
@@ -707,7 +755,7 @@ class LLM:
         credentials = resolve_credentials(model_name, config.api_key_env, extra_env)
         self._api_key: str | None = credentials.api_key
         self._api_base: str | None = credentials.api_base
-        # Proximus.run blanks these in the sandbox: Harbor overlays the agent
+        # OpenWorldHarness.run blanks these in the sandbox: Harbor overlays the agent
         # env onto sandbox commands.
         self.consumed_env_keys: frozenset[str] = credentials.consumed_env_keys
         # Set by the agent once the run's session id exists; scopes the
@@ -767,6 +815,15 @@ class LLM:
         if tools is None:
             return False
         return bool(OpenAIGPT5Config.is_model_gpt_5_4_plus_model(model))
+
+    def is_openai_reasoning_series(self) -> bool:
+        """An OpenAI-route model (``openai/`` or bare) of the gpt-5 reasoning
+        series, gpt-6 included; not one served by a proxy provider such as
+        ``openrouter/openai/...``."""
+        model = self.model_name.lower()
+        if "/" in model and not model.startswith("openai/"):
+            return False  # some other provider's route
+        return bool(OpenAIGPT5Config.is_model_gpt_5_model(model))
 
     async def query(
         self,
@@ -848,6 +905,20 @@ class LLM:
             if self.session_id:
                 extra_body["prompt_cache_key"] = self.session_id
             completion_kwargs["extra_body"] = extra_body
+        elif (
+            tools is not None
+            and not self._config.reasoning_effort
+            and "reasoning_effort" not in self._config.llm_call_kwargs
+            and self.is_openai_reasoning_series()
+            and _litellm_strips_summary_alias()
+        ):
+            # Without an effort litellm still sends gpt-5.4+ with tools to
+            # /v1/responses, so ask for summaries here too. litellm maps this
+            # alias to reasoning.summary on that path and strips it on the
+            # chat path. It reads it for routing only together with an effort
+            # (then older gpt-5 models move to /v1/responses), hence only
+            # without one: the route does not change.
+            completion_kwargs["extra_body"] = {"reasoning_summary": "auto"}
         # Deliberately no tool_choice, ever: Anthropic's hierarchical cache
         # invalidation would flush the messages cache if it changed between
         # a normal turn and the compaction summary call.

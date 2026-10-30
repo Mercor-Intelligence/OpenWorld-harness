@@ -20,14 +20,14 @@ from harbor.models.task.config import MCPServerConfig
 from harbor.utils.templating import render_prompt_template
 from harbor.utils.trajectory_utils import format_trajectory_json
 
-import harbor_proximus.images as images
-import harbor_proximus.llm as llm
-import harbor_proximus.prompts as prompts
-import harbor_proximus.submissions as submissions
-import harbor_proximus.timer as timer
-import harbor_proximus.tools as tools
-import harbor_proximus.utils as utils
-from harbor_proximus.config import ProximusConfig
+import openworld_harness.images as images
+import openworld_harness.llm as llm
+import openworld_harness.prompts as prompts
+import openworld_harness.submissions as submissions
+import openworld_harness.timer as timer
+import openworld_harness.tools as tools
+import openworld_harness.utils as utils
+from openworld_harness.config import ProximusConfig
 
 EMPTY_TURN_STALL_LIMIT = 3
 # Fraction of the context window at which proactive compaction runs
@@ -126,7 +126,7 @@ class Proximus(BaseAgent):
 
     @override
     def version(self) -> str | None:
-        return version("harbor-proximus")
+        return version("openworld-harness")
 
     @override
     async def setup(self, environment: BaseEnvironment) -> None:
@@ -146,11 +146,15 @@ class Proximus(BaseAgent):
         with self._sandbox_credential_scope(environment):
             await self._run_task(instruction, environment, context)
 
+    def _sandbox_hidden_env_keys(self) -> set[str]:
+        """Host-side credentials that sandbox commands must not see."""
+        return set(self._llm.consumed_env_keys)
+
     def _sandbox_credential_scope(
         self, environment: BaseEnvironment
     ) -> contextlib.AbstractContextManager:
-        """Hide host-side model credentials from sandbox commands."""
-        hidden = {name: "" for name in sorted(self._llm.consumed_env_keys)}
+        """Hide host-side credentials from sandbox commands."""
+        hidden = {name: "" for name in sorted(self._sandbox_hidden_env_keys())}
         scope = getattr(environment, "scoped_exec_env", None)
         return scope(hidden) if hidden and scope else contextlib.nullcontext()
 
@@ -204,10 +208,25 @@ class Proximus(BaseAgent):
                     ):
                         await self._auto_final_submission()
                     if not self._run.env_lost and self.config.restore_on_exit:
-                        await self._submissions.restore_winner()
+                        await self._restore_winner()
             finally:
                 self._populate_context(context)
                 self._dump_artifacts()
+        if self._run.env_lost:
+            # Reached only when the loop itself ended normally: the sandbox died
+            # during the end-of-run submission or restore, so the workspace the
+            # verifier would grade is gone too. Fail the trial, as a death
+            # during the loop does, rather than grade whatever remains.
+            raise tools.EnvironmentGoneError(
+                "the sandbox was lost while finalizing the run"
+            )
+
+    async def _restore_winner(self) -> None:
+        try:
+            await self._submissions.restore_winner()
+        except tools.EnvironmentGoneError as e:
+            self.logger.warning(f"Winner restore failed: the sandbox is gone ({e}).")
+            self._run.env_lost = True
 
     async def _agent_loop(self) -> None:
         for turn in itertools.count(1):
@@ -242,9 +261,7 @@ class Proximus(BaseAgent):
                 continue
             except OutputLengthExceededError:
                 self.logger.debug("Output length exceeded; asking for smaller output.")
-                self._run.messages.append(
-                    {"role": "user", "content": prompts.OUTPUT_LENGTH_MESSAGE}
-                )
+                self._inject_user(prompts.OUTPUT_LENGTH_MESSAGE, "output_length")
                 continue
             except llm.ImageLimitExceededError:
                 # Clear all images to avoid repeatedly hitting the image-count cap.
@@ -269,11 +286,8 @@ class Proximus(BaseAgent):
                     "Provider rejected the newest attached image; removed it "
                     "and informed the model."
                 )
-                self._run.messages.append(
-                    {
-                        "role": "user",
-                        "content": prompts.INVALID_IMAGE_MESSAGE.format(error=e),
-                    }
+                self._inject_user(
+                    prompts.INVALID_IMAGE_MESSAGE.format(error=e), "invalid_image"
                 )
                 continue
             except llm.RequestTooLargeError as e:
@@ -284,15 +298,12 @@ class Proximus(BaseAgent):
                     "Request exceeded the provider body cap; evicted the "
                     "newest attached image and informed the model."
                 )
-                note = prompts.REQUEST_TOO_LARGE_MESSAGE.format(error=e)
                 # Reuse the recovery note across consecutive failures.
-                last = self._run.messages[-1]
-                if last.get("role") == "user" and str(last.get("content")).startswith(
-                    "Request failed: "
-                ):
-                    last["content"] = note
-                else:
-                    self._run.messages.append({"role": "user", "content": note})
+                self._inject_user(
+                    prompts.REQUEST_TOO_LARGE_MESSAGE.format(error=e),
+                    "request_too_large",
+                    replace_same_kind=True,
+                )
                 continue
             except Exception as e:
                 budget = self.config.time_budget_sec
@@ -322,12 +333,13 @@ class Proximus(BaseAgent):
                     return
 
                 if self._run.submit_armed_turn is not None:
-                    closer = prompts.CONTINUE_OR_CONFIRM_MESSAGE
+                    self._inject_user(
+                        prompts.CONTINUE_OR_CONFIRM_MESSAGE, "continue_or_confirm"
+                    )
                 elif self._run.consecutive_empty_turns > 0:
-                    closer = prompts.EMPTY_RESPONSE_MESSAGE
+                    self._inject_user(prompts.EMPTY_RESPONSE_MESSAGE, "empty_response")
                 else:
-                    closer = prompts.CONTINUE_MESSAGE
-                self._run.messages.append({"role": "user", "content": closer})
+                    self._inject_user(prompts.CONTINUE_MESSAGE, "continue")
                 continue
 
             end_run = await self._execute_tool_calls(parsed)
@@ -519,12 +531,15 @@ class Proximus(BaseAgent):
         """The task sandbox of the current run."""
         return self._environment
 
+    # Tools a run may lack, so disallowing one is never an error: view_image is
+    # dropped for non-vision models.
+    optional_tools: frozenset[str] = frozenset({"view_image"})
+
     def _filter_tools(self, by_name: dict[str, tools.Tool]) -> dict[str, tools.Tool]:
         removed = set(self.config.disallowed_tools)
         if removed & {"bash", "submit"}:
             raise ValueError("disallowed_tools cannot remove bash or submit")
-        # view_image is dropped for non-vision models, so naming it is fine.
-        unknown = removed - set(by_name) - {"view_image"}
+        unknown = removed - set(by_name) - self.optional_tools
         if unknown:
             raise ValueError(f"disallowed_tools names unknown tools: {sorted(unknown)}")
         return {name: tool for name, tool in by_name.items() if name not in removed}
@@ -536,17 +551,21 @@ class Proximus(BaseAgent):
         return await self._executor.view_image(args)
 
     async def _list_submissions(self, _: tools.NoArgs) -> tools.ToolResult:
-        return tools.ToolResult(prompts.submissions_list(self._submissions.summary()))
+        return tools.ToolResult(
+            prompts.submissions_list(
+                self._submissions.summary(), self._submissions.winner_index()
+            )
+        )
 
     async def _auto_final_submission(self) -> None:
         """Pin the end-of-run workspace as a final submission — the exact
         argless ``submit()`` path — so a run that ends without submitting
         (budget timeout, stall) still leaves its last state on the
         submissions rail: recorded in ``submissions.jsonl`` (flagged
-        ``auto``), graded like any other
-        submission. Skipped when the live tree already matches the newest
-        submission — a clean double-submit ending must not grow a duplicate.
-        Best-effort: nothing here may block the restore."""
+        ``auto``), and graded only when the model recorded no submission of
+        its own (``Submissions.winner_hash``). Skipped when the live tree
+        already matches the winner — a clean double-submit ending must not
+        grow a duplicate. Best-effort: nothing here may block the restore."""
         try:
             winner = self._submissions.winner_hash()
             if winner is not None and await self._submissions.matches_winner(
@@ -557,7 +576,7 @@ class Proximus(BaseAgent):
             submission = await self._submissions.submit("", auto=True)
             self.logger.info(
                 "Auto-recorded end-of-run state as submission "
-                f"#{self._submissions.success_count()} ({submission.hash[:12]})."
+                f"#{submission.index} ({submission.hash[:12]})."
             )
         except tools.EnvironmentGoneError as e:
             self.logger.warning(f"Auto-submission skipped: sandbox is gone ({e}).")
@@ -569,37 +588,47 @@ class Proximus(BaseAgent):
             self.logger.warning(f"Auto-submission errored: {e}")
 
     async def _submit(self, args: tools.SubmitArgs) -> tools.ToolResult:
-        """One submit records and arms; a second on a LATER turn confirms
+        """A submit that records arms; a second on a LATER turn confirms
         and ends the run (two submits in one turn must not self-confirm).
-        A confirm naming the already-recorded commit REUSES that record:
-        re-recording would pin the just-emptied staging dir as the newest
-        winner, which is what the exit restore hands the verifier. A confirm
-        naming a different commit is new work and records normally."""
+        A submit that fails to record neither arms nor confirms, and cancels a
+        pending confirmation: nothing new was recorded, so the model must not
+        end the run on it. A confirm naming the already-recorded commit REUSES
+        that record: re-recording would pin the just-emptied staging dir as the
+        newest winner, which is what the exit restore hands the verifier. A
+        confirm naming a different commit is new work: it records and ends the
+        run."""
         run = self._run
         confirmed = (
             run.submit_armed_turn is not None and run.submit_armed_turn < run.n_turns
         )
-        run.submit_armed_turn = run.n_turns
         if confirmed:
             winner = self._submissions.winner_hash()
             if winner is not None and await self._submissions.matches_winner(
                 args.commit, winner
             ):
-                count = self._submissions.success_count()
-                self.logger.info(f"Confirm reuses submission #{count}; run ends.")
+                index = self._submissions.winner_index()
+                self.logger.info(f"Confirm reuses submission #{index}; run ends.")
                 return tools.ToolResult(prompts.SUBMIT_CONFIRMED, ends_run=True)
         try:
             submission = await self._submissions.submit(args.commit)
-            note = prompts.submission_note(
-                self._submissions.success_count(),
-                submission.hash,
-                submission.description,
-            )
         except submissions.SubmissionError as e:
             self.logger.warning(f"Submission recording failed: {e}")
-            note = prompts.submission_failed(str(e), self._submissions.success_count())
+            run.submit_armed_turn = None
+            return tools.ToolResult(
+                prompts.submission_retry(
+                    str(e),
+                    self._submissions.winner_index() or 0,
+                    self._elapsed(),
+                    self.config.time_budget_sec,
+                )
+            )
+        # Numbered like list_submissions' rows, failed calls included.
+        note = prompts.submission_note(
+            submission.index, submission.hash, submission.description
+        )
         if confirmed:
             return tools.ToolResult(f"{note} {prompts.SUBMIT_CONFIRMED}", ends_run=True)
+        run.submit_armed_turn = run.n_turns
         guidance = prompts.submit_guidance(self._elapsed(), self.config.time_budget_sec)
         return tools.ToolResult(f"{note} {guidance}")
 
@@ -826,6 +855,31 @@ class Proximus(BaseAgent):
             "fallback_turns": run.fallback_turns,
             "fallback_models": dict(run.fallback_models),
         }
+
+    def _inject_user(
+        self, content: str, kind: str, *, replace_same_kind: bool = False
+    ) -> None:
+        """Send the model a harness message and record it as a user step, so
+        the trajectory shows everything the model was told. With
+        ``replace_same_kind``, a message of the same kind that is still the
+        last one is overwritten, with its step, instead of appending one; any
+        other note (an invalid image's guidance) stays."""
+        last_step = self._steps[-1] if self._steps else None
+        last = self._run.messages[-1] if self._run.messages else {}
+        if (
+            replace_same_kind
+            and last_step is not None
+            and (last_step.extra or {}).get("harness_message") == kind
+            and last.get("role") == "user"
+            and last.get("content") == last_step.message
+        ):
+            last["content"] = content
+            self._steps[-1] = last_step.model_copy(
+                update={"message": content, "timestamp": datetime.now(UTC).isoformat()}
+            )
+            return
+        self._run.messages.append({"role": "user", "content": content})
+        self._add_step("user", content, extra={"harness_message": kind})
 
     def _add_step(
         self, source: Literal["system", "user", "agent"], message: str, **kwargs: Any

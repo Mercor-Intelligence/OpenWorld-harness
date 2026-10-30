@@ -8,7 +8,7 @@ from harbor.llms.base import ContextLengthExceededError
 from harbor.models.agent.context import AgentContext
 from pydantic import BaseModel
 
-from harbor_proximus import Proximus, prompts, tools
+from openworld_harness import OpenWorldHarness, prompts, tools
 from tests.test_proximus_loop import (
     FakeCompletion,
     FakeEnv,
@@ -25,7 +25,7 @@ from tests.test_proximus_loop import (
 )
 
 
-def tool_names(agent: Proximus) -> list[str]:
+def tool_names(agent: OpenWorldHarness) -> list[str]:
     return [schema["function"]["name"] for schema in agent._tool_schemas]
 
 
@@ -34,6 +34,15 @@ def test_defaults_are_unchanged(tmp_path):
     assert agent._system_prompt == prompts.system_prompt(False)
     assert agent.summary_request() == prompts.SUMMARY_REQUEST
     assert tool_names(agent) == ["bash", "list_submissions", "submit"]
+
+
+def test_summary_request_does_not_pause_the_task():
+    """A request that opened with "Pause the task." led summaries to tell
+    the next turn that the user had paused the work (H6)."""
+    request = prompts.SUMMARY_REQUEST.lower()
+    assert "pause the task" not in request
+    assert "not paused" in request
+    assert "continue the task immediately afterwards" in request
 
 
 async def test_max_turns_ends_the_run_with_the_exit_submit(tmp_path, monkeypatch):
@@ -95,7 +104,7 @@ async def test_prompt_template_wraps_the_instruction(tmp_path, monkeypatch):
 async def test_llm_shorthands_and_llm_call_kwargs_win(tmp_path, monkeypatch):
     fake = FakeCompletion(finish_responses())
     monkeypatch.setattr(litellm, "acompletion", fake)
-    agent = Proximus(
+    agent = OpenWorldHarness(
         logs_dir=tmp_path / "logs",
         model_name="anthropic/claude-test",
         temperature=0.2,
@@ -126,7 +135,7 @@ async def test_thinking_budget_model_names(
 ):
     fake = FakeCompletion(finish_responses())
     monkeypatch.setattr(litellm, "acompletion", fake)
-    agent = Proximus(
+    agent = OpenWorldHarness(
         logs_dir=tmp_path / "logs",
         model_name=model_name,
         max_thinking_tokens=2048,
@@ -144,7 +153,7 @@ class CountArgs(BaseModel):
     path: str
 
 
-class CustomProximus(Proximus):
+class CustomProximus(OpenWorldHarness):
     def system_prompt(self) -> str:
         return super().system_prompt() + "\n\nPrefer small commits."
 

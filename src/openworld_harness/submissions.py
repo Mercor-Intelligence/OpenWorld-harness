@@ -9,10 +9,14 @@ from typing import Any
 
 from harbor.environments.base import BaseEnvironment
 
-from harbor_proximus import tools, utils
+from openworld_harness import tools, utils
 
 GIT_TIMEOUT_SEC = 60
 DEFAULT_SUBMISSION_TIMEOUT_SEC = 600
+# Of a submission's time, what staging the live workspace may not use: the
+# commit, pin and chown still need it.
+STAGE_RESERVE_SEC = 60
+MIN_STAGE_TIMEOUT_SEC = 30
 RESTORE_TIMEOUT_SEC = 300
 _FULL_COMMIT_OID = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
 
@@ -27,6 +31,8 @@ class Submission:
     # True when the harness itself made the commit (a commitless submit on
     # a dirty tree); mirrored to the record row as ``harness_commit``.
     harness_committed: bool = False
+    # The row's number, as list_submissions shows it (failed calls count).
+    index: int = 0
 
 
 class SubmissionError(Exception):
@@ -61,15 +67,16 @@ class Submissions:
         self._submission_timeout_sec = int(submission_timeout_sec)
         self._submissions: list[dict[str, Any]] = []
 
-    def _git_exec(self, script: str, env: dict[str, str], timeout_sec: int):
-        """Run a harness git script as root, not as the agent user.
+    async def _git_exec(self, script: str, env: dict[str, str], timeout_sec: int):
+        """Run a harness git script as root, not as the agent user. A result
+        from a stopped container raises EnvironmentGoneError.
 
         Root git refuses the agent-owned workspace repo ("dubious ownership")
         unless safe.directory covers it. Injected as GIT_CONFIG_* env — every
         git subcommand in every script inherits it, on any task image, without
         mutating the image's git config. Without it, every submit fails on
         an image that lacks the setting, and the trial is left ungradable."""
-        return self._environment.exec(
+        result = await self._environment.exec(
             script,
             env={
                 "GIT_CONFIG_COUNT": "1",
@@ -80,6 +87,8 @@ class Submissions:
             timeout_sec=timeout_sec,
             user="root",
         )
+        tools.raise_if_exec_result_gone(result)
+        return result
 
     async def ensure_git(self) -> None:
         """Make the workspace a git repository."""
@@ -105,11 +114,13 @@ class Submissions:
         ``SubmissionError`` after recording the failure; a dead sandbox
         propagates as ``EnvironmentGoneError`` before anything is recorded.
         ``auto`` marks the harness's end-of-run submission so analysis can
-        tell it from ones the model chose to make."""
+        tell it from ones the model chose to make; it is committed without
+        moving HEAD or the index."""
         started = time.monotonic()
         try:
+            # Pinned under the row's number, the one the model is shown.
             hash_, description, harness_committed = await self._resolve_and_pin(
-                self.success_count() + 1, ref
+                len(self._submissions) + 1, ref, keep_head=auto
             )
         except SubmissionError as e:
             failure: dict[str, Any] = {
@@ -126,11 +137,15 @@ class Submissions:
             self._append(failure)
             raise
         submission = Submission(
-            hash_, description, self._since(started), harness_committed
+            hash_,
+            description,
+            self._since(started),
+            harness_committed,
+            index=len(self._submissions) + 1,
         )
         entry: dict[str, Any] = {
             "event": "submission",
-            "index": len(self._submissions) + 1,
+            "index": submission.index,
             "ok": True,
             "hash": submission.hash,
             "record_sec": submission.duration_sec,
@@ -167,14 +182,23 @@ class Submissions:
             return False
         return result.return_code == 0
 
-    async def _resolve_and_pin(self, index: int, ref: str) -> tuple[str, str, bool]:
+    async def _resolve_and_pin(
+        self, index: int, ref: str, *, keep_head: bool = False
+    ) -> tuple[str, str, bool]:
         """Run ``record_commit.sh``; returns (hash, subject,
-        harness_committed). Raises ``SubmissionError`` with model-readable
-        guidance."""
+        harness_committed). ``keep_head`` snapshots without moving HEAD or
+        the index (the exit snapshot). Raises ``SubmissionError`` with
+        model-readable guidance."""
         try:
             result = await self._git_exec(
                 utils.read_script("record_commit.sh"),
-                {"wd": self._workdir, "commit": ref, "idx": str(int(index))},
+                {
+                    "wd": self._workdir,
+                    "commit": ref,
+                    "idx": str(int(index)),
+                    "stage_timeout": self._stage_timeout_sec(),
+                    "keep_head": "1" if keep_head else "",
+                },
                 self._submission_timeout_sec,
             )
         except TimeoutError as e:
@@ -193,6 +217,13 @@ class Submissions:
             detail = tools.format_exec_output(result.stdout, result.stderr)
             raise SubmissionError(tools.truncate_middle(detail, 500))
         return self._parse_record_output(str(result.stdout or ""))
+
+    def _stage_timeout_sec(self) -> str:
+        """Seconds staging may take, or "" (unbounded) when the submission's
+        time cannot fit the bound plus its cleanup: the exec's own timeout
+        would then kill git first and skip the cleanup."""
+        stage = int(self._submission_timeout_sec - STAGE_RESERVE_SEC)
+        return str(stage) if stage >= MIN_STAGE_TIMEOUT_SEC else ""
 
     @staticmethod
     def _parse_record_output(stdout: str) -> tuple[str, str, bool]:
@@ -224,18 +255,18 @@ class Submissions:
         except Exception as e:
             self._logger.warning(f"Could not write submissions.jsonl: {e}")
 
-    def success_count(self) -> int:
-        return sum(1 for e in self._submissions if e["ok"])
-
     def valid_hash_count(self) -> int:
         """Successful rows that carry a complete Git object id."""
-        return sum(
-            1
+        return len(self._restorable())
+
+    def _restorable(self) -> list[dict[str, Any]]:
+        return [
+            entry
             for entry in self._submissions
             if entry.get("ok")
             and isinstance(entry.get("hash"), str)
             and _FULL_COMMIT_OID.fullmatch(entry["hash"]) is not None
-        )
+        ]
 
     def summary(self) -> list[dict[str, Any]]:
         """Per-submission rows for run metadata and ``list_submissions``."""
@@ -244,19 +275,29 @@ class Submissions:
             for entry in self._submissions
         ]
 
+    def _winner(self) -> dict[str, Any] | None:
+        winners = self._restorable()
+        chosen = [entry for entry in winners if not entry.get("auto")] or winners
+        return chosen[-1] if chosen else None
+
     def winner_hash(self) -> str | None:
-        """Newest successful row with a complete Git object id."""
-        winners = [
-            entry["hash"]
-            for entry in self._submissions
-            if entry.get("ok")
-            and isinstance(entry.get("hash"), str)
-            and _FULL_COMMIT_OID.fullmatch(entry["hash"]) is not None
-        ]
-        return winners[-1] if winners else None
+        """The commit grading restores: the newest successful submission the
+        model made, else the newest end-of-run auto-submission. A run that
+        times out after submitting is graded on the tracked files the model
+        submitted, not on its later edits to them; files it created after that
+        submission stay in place (restore_winner.sh), and the auto row stays
+        on the record."""
+        winner = self._winner()
+        return None if winner is None else winner["hash"]
+
+    def winner_index(self) -> int | None:
+        """The ``index`` of the row ``winner_hash`` comes from."""
+        winner = self._winner()
+        return None if winner is None else winner["index"]
 
     async def restore_winner(self) -> bool:
-        """Restore the winning commit; True once the workspace holds it."""
+        """Restore the winning commit; True once the workspace holds it. A
+        dead sandbox raises EnvironmentGoneError; other failures are logged."""
         winner = self.winner_hash()
         if not winner:
             self._logger.warning("Winner restore skipped: no valid submission exists.")
@@ -267,7 +308,10 @@ class Submissions:
                 {"wd": self._workdir, "winner": winner},
                 RESTORE_TIMEOUT_SEC,
             )
+        except tools.EnvironmentGoneError:
+            raise
         except Exception as e:
+            tools.raise_if_environment_gone(e)
             self._logger.warning(f"Winner restore failed: {e}")
             return False
         if result.return_code != 0:

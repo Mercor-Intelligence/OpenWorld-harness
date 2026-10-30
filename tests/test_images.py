@@ -8,7 +8,7 @@ import logging
 import pytest
 from PIL import Image
 
-from harbor_proximus import images
+from openworld_harness import images
 
 pytestmark = pytest.mark.unit
 

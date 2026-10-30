@@ -1,4 +1,5 @@
 import json
+import re
 import tempfile
 import time
 from collections.abc import Awaitable, Callable
@@ -9,8 +10,8 @@ from typing import Any
 from harbor.environments.base import BaseEnvironment
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-import harbor_proximus.images as images
-from harbor_proximus.config import BUDGET_MARGIN_SEC
+import openworld_harness.images as images
+from openworld_harness.config import BUDGET_MARGIN_SEC
 
 
 class EnvironmentGoneError(RuntimeError):
@@ -23,6 +24,9 @@ class EnvironmentGoneError(RuntimeError):
 _GONE_EXCEPTION_NAMES = frozenset(
     {
         "SandboxTerminatedError",  # modal: OOM, preemption, kill
+        # harbor's modal environment: an operation failed and the sandbox
+        # itself had exited with 137 (sandbox.poll()), i.e. an OOM kill
+        "SandboxLikelyOutOfMemoryError",
         "SandboxTimeoutError",  # modal: sandbox lifetime expired
         "DaytonaNotFoundError",  # daytona: sandbox 404
         "SandboxNotFoundException",  # e2b: deleted or expired
@@ -51,7 +55,41 @@ def _is_environment_transport_loss(error: Exception) -> bool:
             "connecting to control server" in message
             and "connection refused" in message
         )
+        or _names_a_stopped_container(message)
     )
+
+
+# Modal refusing an exec because the container has stopped.
+_STOPPED_CONTAINER = re.compile(
+    r"(?:executing processes for container: )?"
+    r'cannot execute in container "[^"\n]*" in state stopped',
+    re.IGNORECASE,
+)
+
+
+def _names_a_stopped_container(text: str) -> bool:
+    return _STOPPED_CONTAINER.search(text) is not None
+
+
+def exec_result_shows_environment_gone(result: Any) -> bool:
+    """An exec that "completed" only because the container had already
+    stopped: Modal reports that as a nonzero result, not an exception. A
+    process killed inside a live sandbox exits 137 too, so the exit code alone
+    never counts. The command's own output lands in the same fields, so the
+    result must be nothing but Modal's message: no stdout, and a stderr that
+    is that one line."""
+    return (
+        bool(result.return_code)
+        and not str(result.stdout or "").strip()
+        and _STOPPED_CONTAINER.fullmatch(str(result.stderr or "").strip()) is not None
+    )
+
+
+def raise_if_exec_result_gone(result: Any) -> None:
+    """Raise EnvironmentGoneError for a result from a stopped container."""
+    if exec_result_shows_environment_gone(result):
+        detail = truncate_middle(str(result.stderr or "").strip(), 300)
+        raise EnvironmentGoneError(f"exit code {result.return_code}: {detail}")
 
 
 def raise_if_environment_gone(error: Exception) -> None:
@@ -66,6 +104,12 @@ def raise_if_environment_gone(error: Exception) -> None:
     if gone:
         raise EnvironmentGoneError(f"{name}: {error}") from error
 
+
+# Sandbox commands in a row that fail without running (the exec call itself
+# raises, unclassified) before a trivial probe command decides whether the
+# sandbox is gone or only those commands were refused.
+MAX_CONSECUTIVE_EXEC_FAILURES = 5
+LIVENESS_PROBE_TIMEOUT_SEC = 60
 
 # Fixed executor limits. Command timeouts are additionally capped at the
 # remaining time budget minus BUDGET_MARGIN_SEC, so the loop regains control
@@ -280,6 +324,7 @@ class ToolExecutor:
         # time budget — the loop must regain control before the hard kill.
         self._remaining_sec = remaining_sec
         self._default_workdir = default_workdir
+        self._exec_failures = 0  # in a row; see MAX_CONSECUTIVE_EXEC_FAILURES
 
     async def bash(self, args: BashArgs) -> ToolResult:
         if args.timeout_sec > MAX_TIMEOUT_SEC:
@@ -304,6 +349,7 @@ class ToolExecutor:
         except UnicodeDecodeError as e:
             # Binary bytes on stdout/stderr break the transport's text
             # decoding; the whole output is lost.
+            self._exec_failures = 0
             return ToolResult(
                 f"Command output could not be decoded as text ({e}). Its "
                 "output was discarded. Binary data must not reach "
@@ -315,11 +361,33 @@ class ToolExecutor:
             # Modal's SandboxTimeoutError subclasses builtin TimeoutError but
             # means the sandbox died, not the command — classify first.
             raise_if_environment_gone(e)
+            self._exec_failures = 0
             return ToolResult(
                 f"Command timed out after {timeout}s (timeout_sec={timeout}) "
                 f"and was killed. {self._timeout_guidance(timeout)}",
                 is_error=True,
             )
+        except EnvironmentGoneError:
+            raise
+        except Exception as e:
+            raise_if_environment_gone(e)
+            self._exec_failures += 1
+            if self._exec_failures >= MAX_CONSECUTIVE_EXEC_FAILURES:
+                if not await self._sandbox_answers():
+                    # Unrecognized, but the sandbox has stopped running commands.
+                    raise EnvironmentGoneError(
+                        f"{self._exec_failures} commands in a row could not run "
+                        f"in the sandbox; the last: {type(e).__name__}: {e}"
+                    ) from e
+                # The sandbox is fine; the exec refused these commands.
+                self._exec_failures = 0
+            raise
+        self._exec_failures = 0
+        # The command's own output can look the same, so the sandbox decides.
+        if exec_result_shows_environment_gone(result) and not (
+            await self._sandbox_answers()
+        ):
+            raise_if_exec_result_gone(result)
         body = format_exec_output(result.stdout, result.stderr)
         elapsed = time.monotonic() - started
         if self._looks_like_timeout(result.return_code, elapsed, timeout):
@@ -333,6 +401,22 @@ class ToolExecutor:
             f"exit code: {result.return_code}\n{body}",
             is_error=result.return_code != 0,
         )
+
+    async def _sandbox_answers(self) -> bool:
+        """Whether a trivial command still runs in the sandbox. A probe that
+        only times out is inconclusive (an overloaded sandbox is slow, a dead
+        one refuses at once), so it counts as alive."""
+        try:
+            result = await self._environment.exec(
+                "true", timeout_sec=LIVENESS_PROBE_TIMEOUT_SEC
+            )
+        except TimeoutError as e:
+            raise_if_environment_gone(e)
+            return True
+        except Exception as e:
+            raise_if_environment_gone(e)
+            return False
+        return not exec_result_shows_environment_gone(result)
 
     async def view_image(self, args: ViewImageArgs) -> ToolResult:
         path = args.path

@@ -14,9 +14,10 @@ from harbor.models.agent.context import AgentContext
 from harbor.models.task.config import NetworkMode, NetworkPolicy
 from harbor.models.trial.config import AgentConfig
 
-from harbor_proximus import Proximus
-from harbor_proximus.prompts import (
+from openworld_harness import OpenWorldHarness
+from openworld_harness.prompts import (
     CONTINUE_MESSAGE,
+    CONTINUE_OR_CONFIRM_MESSAGE,
     EMPTY_RESPONSE_MESSAGE,
     OUTPUT_LENGTH_MESSAGE,
     PROGRESS_FILE,
@@ -24,8 +25,8 @@ from harbor_proximus.prompts import (
     TASK_TIMER_GUIDANCE,
     fmt_duration,
 )
-from harbor_proximus.timer import DEADLINE_PATH, write_deadline
-from harbor_proximus.tools import EnvironmentGoneError
+from openworld_harness.timer import DEADLINE_PATH, write_deadline
+from openworld_harness.tools import EnvironmentGoneError
 
 pytestmark = pytest.mark.unit
 
@@ -193,19 +194,19 @@ class FakeCompletion:
         return item
 
 
-def make_bridged_agent(tmp_path, **kwargs) -> Proximus:
+def make_bridged_agent(tmp_path, **kwargs) -> OpenWorldHarness:
     """An agent whose model actually satisfies litellm's chat->Responses
     bridge gate (OpenAI, gpt-5.4+, reasoning_effort, tools)."""
     kwargs.setdefault("reasoning_effort", "xhigh")
-    return Proximus(
+    return OpenWorldHarness(
         logs_dir=tmp_path / "logs",
         model_name="openai/gpt-5.4",
         **kwargs,
     )
 
 
-def make_agent(tmp_path, **kwargs) -> Proximus:
-    return Proximus(
+def make_agent(tmp_path, **kwargs) -> OpenWorldHarness:
+    return OpenWorldHarness(
         logs_dir=tmp_path / "logs",
         model_name="openai/gpt-test",
         **kwargs,
@@ -221,22 +222,22 @@ def small_context(monkeypatch, limit: int = 1000) -> None:
     )
 
 
-def read_trajectory(agent: Proximus) -> dict:
+def read_trajectory(agent: OpenWorldHarness) -> dict:
     return json.loads((agent.logs_dir / "trajectory.json").read_text())
 
 
-def read_messages(agent: Proximus) -> list[dict]:
+def read_messages(agent: OpenWorldHarness) -> list[dict]:
     return json.loads((agent.logs_dir / "messages.json").read_text())
 
 
 def test_proximus_loads_through_custom_agent_factory():
-    config = AgentConfig(import_path="harbor_proximus:Proximus")
-    assert AgentFactory.get_agent_class_from_config(config) is Proximus
+    config = AgentConfig(import_path="openworld_harness:OpenWorldHarness")
+    assert AgentFactory.get_agent_class_from_config(config) is OpenWorldHarness
 
 
 def test_requires_model_name(tmp_path):
     with pytest.raises(ValueError, match="model_name"):
-        Proximus(logs_dir=tmp_path)
+        OpenWorldHarness(logs_dir=tmp_path)
 
 
 @pytest.mark.parametrize(
@@ -476,8 +477,11 @@ async def test_submit_ignores_stray_arguments(tmp_path, monkeypatch):
     assert context.metadata["n_submissions"] == 2
 
 
-async def test_failed_record_falls_back_to_final_state(tmp_path, monkeypatch):
-    fake = FakeCompletion(finish_responses())
+async def test_failed_record_never_arms_or_ends_the_run(tmp_path, monkeypatch):
+    # Every record fails (a broken-git sandbox). A failed submit records
+    # nothing, so it neither arms nor confirms: the run continues to its turn
+    # limit, which ends it like a time-out.
+    fake = FakeCompletion([submit_response() for _ in range(3)])
     monkeypatch.setattr(litellm, "acompletion", fake)
 
     class BrokenGitEnv(FakeEnv):
@@ -496,24 +500,29 @@ async def test_failed_record_falls_back_to_final_state(tmp_path, monkeypatch):
 
     env = BrokenGitEnv()
     context = AgentContext()
-    agent = make_agent(tmp_path)
+    agent = make_agent(tmp_path, max_turns=3, time_budget_sec=7200)
     await agent.run("Do a task", env, context)  # type: ignore[arg-type]
 
     messages = read_messages(agent)
     tool_contents = [m["content"] for m in messages if m.get("role") == "tool"]
-    assert any("could not be recorded" in c for c in tool_contents)
-    assert any("final workspace state" in c for c in tool_contents)
-    # The consecutive submit still ends the session despite failed recordings
-    # (a broken-git sandbox must not trap the run).
-    assert any("Final submission confirmed" in c for c in tool_contents)
+    assert len(tool_contents) == 3
+    for content in tool_contents:
+        assert "could not be recorded" in content
+        assert "final workspace state" in content
+        assert "Nothing was recorded by this call and the run continues" in content
+        assert "time budget remains" in content
+        assert "confirm this as your final submission" not in content
+        assert "Final submission confirmed" not in content
     assert context.metadata is not None
+    assert context.metadata["ended_by_submit"] is False
     assert context.metadata["n_submissions"] == 0
-    # Failed model submit calls remain recorded for telemetry. A confirmed
-    # ending never adds a hidden auto-submission or changes the selected state.
-    assert [s["ok"] for s in context.metadata["submissions"]] == [False, False]
-    assert all(not s.get("auto") for s in context.metadata["submissions"])
+    # The model's failed calls stay recorded for telemetry, and the exit
+    # auto-submission tried (and failed) too.
+    rows = context.metadata["submissions"]
+    assert [s["ok"] for s in rows] == [False] * 4
+    assert [bool(s.get("auto")) for s in rows] == [False, False, False, True]
     assert context.metadata["submitted_commit"] is None
-    assert len(env.record_calls) == 2
+    assert len(env.record_calls) == 4
 
 
 async def test_proactive_compaction(tmp_path, monkeypatch):
@@ -596,7 +605,7 @@ async def test_time_budget_exhausted_ends_run_without_querying(tmp_path, monkeyp
     # the run before any LLM call is made (FakeCompletion would raise if hit).
     fake = FakeCompletion([])
     monkeypatch.setattr(litellm, "acompletion", fake)
-    monkeypatch.setattr(Proximus, "_elapsed", lambda self: 4000.0)
+    monkeypatch.setattr(OpenWorldHarness, "_elapsed", lambda self: 4000.0)
 
     agent = make_agent(tmp_path, time_budget_sec=3600)
     context = AgentContext()
@@ -712,7 +721,7 @@ def empty_response() -> FakeResponse:
 
 
 async def test_consecutive_empty_turns_end_the_run(tmp_path, monkeypatch):
-    from harbor_proximus.proximus import EMPTY_TURN_STALL_LIMIT
+    from openworld_harness.proximus import EMPTY_TURN_STALL_LIMIT
 
     # Exactly the limit is queued: FakeCompletion would raise on one more.
     fake = FakeCompletion([empty_response() for _ in range(EMPTY_TURN_STALL_LIMIT)])
@@ -781,6 +790,42 @@ async def test_empty_turn_gets_the_directive_closer(tmp_path, monkeypatch):
     # The prose turn keeps "Continue."; every empty one is nagged.
     assert closers.count(CONTINUE_MESSAGE) == 1
     assert closers.count(EMPTY_RESPONSE_MESSAGE) == 3
+
+
+async def test_harness_messages_are_recorded_in_the_trajectory(tmp_path, monkeypatch):
+    """Every message the harness sends the model is a user step tagged with
+    its kind, so a trajectory reader sees what the model was told (H5)."""
+    truncated = text_response("cut off mid-")
+    truncated.choices[0].finish_reason = "length"
+    fake = FakeCompletion(
+        [
+            truncated,
+            text_response("planning"),
+            empty_response(),
+            submit_response(),
+            text_response("one more look"),
+            submit_response(),
+        ]
+    )
+    monkeypatch.setattr(litellm, "acompletion", fake)
+
+    agent = make_agent(tmp_path)
+    await agent.run("Task", FakeEnv(), AgentContext())  # type: ignore[arg-type]
+
+    steps = read_trajectory(agent)["steps"]
+    harness = [
+        (s["message"], s["extra"]["harness_message"])
+        for s in steps
+        if s["source"] == "user" and (s.get("extra") or {}).get("harness_message")
+    ]
+    assert harness == [
+        (OUTPUT_LENGTH_MESSAGE, "output_length"),
+        (CONTINUE_MESSAGE, "continue"),
+        (EMPTY_RESPONSE_MESSAGE, "empty_response"),
+        (CONTINUE_OR_CONFIRM_MESSAGE, "continue_or_confirm"),
+    ]
+    # Each one follows the turn it answers (the truncated turn is dropped).
+    assert "".join(s["source"][0] for s in steps) == "suuauauaaua"
 
 
 async def test_opaque_thinking_blocks_do_not_count_as_empty(tmp_path, monkeypatch):
@@ -1115,7 +1160,9 @@ async def test_time_budget_ends_run_mid_stream(tmp_path, monkeypatch):
     # third does not, so exactly two LLM calls are made.
     fake = FakeCompletion([bash_response("echo 1"), bash_response("echo 2")])
     monkeypatch.setattr(litellm, "acompletion", fake)
-    monkeypatch.setattr(Proximus, "_elapsed", lambda self: self._run.n_turns * 1500.0)
+    monkeypatch.setattr(
+        OpenWorldHarness, "_elapsed", lambda self: self._run.n_turns * 1500.0
+    )
 
     agent = make_agent(tmp_path, time_budget_sec=3600)
     context = AgentContext()
@@ -1520,7 +1567,9 @@ def test_cache_breakpoints_use_the_1h_ttl(tmp_path):
     message hosts it as a top-level ``cache_control`` key (the one litellm
     reads) rather than inside ``content``, so this counts both shapes.
     """
-    agent = Proximus(logs_dir=tmp_path / "logs", model_name="anthropic/claude-opus-5")
+    agent = OpenWorldHarness(
+        logs_dir=tmp_path / "logs", model_name="anthropic/claude-opus-5"
+    )
     wire = agent._llm._apply_prompt_caching(  # type: ignore[attr-defined]
         [
             {"role": "system", "content": "sys"},
@@ -1547,7 +1596,7 @@ def test_non_anthropic_models_are_not_tagged(tmp_path):
     """OpenAI caches automatically and exposes no TTL control -- litellm lists
     no cache_creation_input_token_cost_above_1hr for it, and its automatic
     caching already reaches high hit rates untouched."""
-    agent = Proximus(logs_dir=tmp_path / "logs", model_name="openai/gpt-test")
+    agent = OpenWorldHarness(logs_dir=tmp_path / "logs", model_name="openai/gpt-test")
     msgs = [{"role": "system", "content": "sys"}, {"role": "user", "content": "u"}]
     assert agent._llm._apply_prompt_caching(msgs) is msgs  # type: ignore[attr-defined]
 
@@ -1626,7 +1675,7 @@ async def test_chat_reasoning_content_round_trip(tmp_path, monkeypatch, model_na
     fake = FakeCompletion([first, *finish_responses()])
     monkeypatch.setattr(litellm, "acompletion", fake)
 
-    agent = Proximus(
+    agent = OpenWorldHarness(
         logs_dir=tmp_path / "logs",
         model_name=model_name,
         api_key_env=None,
@@ -1655,7 +1704,7 @@ async def test_gemini_thought_signature_round_trip(tmp_path, monkeypatch):
     fake = FakeCompletion([first, *finish_responses()])
     monkeypatch.setattr(litellm, "acompletion", fake)
 
-    agent = Proximus(
+    agent = OpenWorldHarness(
         logs_dir=tmp_path / "logs",
         model_name="gemini/test-model",
         api_key_env=None,
@@ -1672,7 +1721,7 @@ async def test_anthropic_gets_no_reasoning_items_or_extra_body(tmp_path, monkeyp
     fake = FakeCompletion(finish_responses())
     monkeypatch.setattr(litellm, "acompletion", fake)
 
-    agent = Proximus(
+    agent = OpenWorldHarness(
         logs_dir=tmp_path / "logs",
         model_name="anthropic/claude-opus-test",
         reasoning_effort="high",
@@ -1750,6 +1799,90 @@ async def test_bridged_request_carries_responses_params(tmp_path, monkeypatch):
     assert "prompt_cache_key" not in fake.calls[0]
 
 
+@pytest.mark.parametrize(
+    ("model", "summary"),
+    [
+        ("openai/gpt-5.4", True),
+        ("gpt-5.4", True),
+        ("openai/gpt-6.1-test", True),
+        ("openai/gpt-test", False),
+        ("anthropic/claude-test", False),
+        # A proxy route: litellm strips the alias only on the OpenAI route.
+        ("openrouter/openai/gpt-5.4", False),
+    ],
+)
+async def test_default_effort_requests_ask_for_reasoning_summaries(
+    tmp_path, monkeypatch, model, summary
+):
+    """Without an effort the request is not bridged here, but litellm still
+    sends gpt-5.4+ with tools to the Responses API: the summary must be
+    requested anyway, or the trajectory's reasoning stays empty (H5)."""
+    fake = FakeCompletion(finish_responses())
+    monkeypatch.setattr(litellm, "acompletion", fake)
+
+    agent = OpenWorldHarness(
+        logs_dir=tmp_path / "logs",
+        model_name=model,
+        model_info={"max_input_tokens": 200_000},
+    )
+    await agent.run("Task", FakeEnv(), AgentContext())  # type: ignore[arg-type]
+
+    call = fake.calls[0]
+    assert "reasoning_effort" not in call
+    if summary:
+        # Only the summary: the other Responses params change the request.
+        assert call["extra_body"] == {"reasoning_summary": "auto"}
+    else:
+        assert "extra_body" not in call
+
+
+async def test_an_older_litellm_is_not_asked_for_summaries(tmp_path, monkeypatch):
+    """A litellm that cannot strip the alias would send it to Chat Completions,
+    which rejects unknown arguments."""
+    fake = FakeCompletion(finish_responses())
+    monkeypatch.setattr(litellm, "acompletion", fake)
+    monkeypatch.delattr(
+        litellm.utils, "strip_reasoning_summary_aliases_from_optional_params"
+    )
+
+    agent = make_bridged_agent(tmp_path, reasoning_effort=None)
+    await agent.run("Task", FakeEnv(), AgentContext())  # type: ignore[arg-type]
+
+    assert "extra_body" not in fake.calls[0]
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"reasoning_effort": "high"},
+        {"llm_call_kwargs": {"reasoning_effort": "high"}},
+    ],
+)
+async def test_an_unbridged_effort_gets_no_summary(tmp_path, monkeypatch, options):
+    """With an effort, a summary alias makes litellm move an older gpt-5
+    model to /v1/responses, without the params replay needs there."""
+    fake = FakeCompletion(finish_responses())
+    monkeypatch.setattr(litellm, "acompletion", fake)
+
+    agent = OpenWorldHarness(
+        logs_dir=tmp_path / "logs", model_name="openai/gpt-5.1", **options
+    )
+    assert not agent._llm.uses_responses_bridge([{"type": "function"}])
+    await agent.run("Task", FakeEnv(), AgentContext())  # type: ignore[arg-type]
+
+    assert "extra_body" not in fake.calls[0]
+
+
+async def test_requests_without_tools_ask_for_no_summary(tmp_path, monkeypatch):
+    fake = FakeCompletion([text_response("done")])
+    monkeypatch.setattr(litellm, "acompletion", fake)
+
+    agent = make_bridged_agent(tmp_path, reasoning_effort=None)
+    await agent._llm.query([{"role": "user", "content": "hi"}], None)
+
+    assert "extra_body" not in fake.calls[0]
+
+
 async def test_xai_responses_request_keeps_system(tmp_path, monkeypatch):
     """xAI Responses needs the shared Responses extra_body, plus list-content
     system messages so LiteLLM does not drop them as unsupported
@@ -1766,7 +1899,7 @@ async def test_xai_responses_request_keeps_system(tmp_path, monkeypatch):
         },
     )
 
-    agent = Proximus(
+    agent = OpenWorldHarness(
         logs_dir=tmp_path / "logs",
         model_name="xai/grok-test-model",
         reasoning_effort="high",
@@ -1858,7 +1991,7 @@ async def test_bare_thinking_turn_is_not_replayed(tmp_path, monkeypatch):
     fake = FakeCompletion([bare, working, *finish_responses()])
     monkeypatch.setattr(litellm, "acompletion", fake)
 
-    agent = Proximus(
+    agent = OpenWorldHarness(
         logs_dir=tmp_path / "logs",
         model_name="anthropic/claude-opus-test",
         reasoning_effort="high",
@@ -1999,7 +2132,7 @@ async def test_env_gone_mid_batch_fills_remaining_results(tmp_path, monkeypatch)
 
 
 def test_drop_orphan_tool_results_enforces_pairing():
-    from harbor_proximus.llm import drop_orphan_tool_results
+    from openworld_harness.llm import drop_orphan_tool_results
 
     asst = {
         "role": "assistant",
@@ -2102,7 +2235,7 @@ async def test_request_too_large_evicts_newest_image_and_retries(tmp_path, monke
     # NEWEST attached image — least prompt cache busted, and it is the image
     # the model can re-view compressed — relays the provider error verbatim,
     # and the run continues. The older image survives untouched.
-    from harbor_proximus.prompts import REQUEST_TOO_LARGE_MESSAGE
+    from openworld_harness.prompts import REQUEST_TOO_LARGE_MESSAGE
 
     view1 = FakeResponse(
         FakeMessage(
@@ -2176,12 +2309,78 @@ async def test_request_too_large_evicts_newest_image_and_retries(tmp_path, monke
     assert len(notes) == 1
     assert "10485760" in notes[0]  # the provider's error, verbatim
     assert notes[0] == REQUEST_TOO_LARGE_MESSAGE.format(error=gateway_413)
+    recorded = [
+        s["message"]
+        for s in read_trajectory(agent)["steps"]
+        if (s.get("extra") or {}).get("harness_message") == "request_too_large"
+    ]
+    assert recorded == [notes[0]]
+
+
+async def test_a_replaced_request_failure_note_replaces_its_step(tmp_path, monkeypatch):
+    """Back-to-back 413s keep one note in the conversation; the trajectory
+    must show that one note too, not one step per retry."""
+    from openworld_harness.prompts import REQUEST_TOO_LARGE_MESSAGE
+
+    def view(call_id: str, path: str) -> FakeResponse:
+        return FakeResponse(
+            FakeMessage(
+                content="look",
+                tool_calls=[
+                    FakeToolCall(call_id, "view_image", json.dumps({"path": path}))
+                ],
+            )
+        )
+
+    first, second = (
+        RuntimeError(
+            '{"code":"RequestEntityTooLarge","message":"Request body size '
+            f'exceeds maximum allowed size: {cap} bytes"}}'
+        )
+        for cap in (10485760, 10485761)
+    )
+    fake = FakeCompletion(
+        [
+            view("c1", "/app/a.png"),
+            view("c2", "/app/b.png"),
+            first,
+            second,
+            bash_response("echo recovered"),
+            *finish_responses(),
+        ]
+    )
+    monkeypatch.setattr(litellm, "acompletion", fake)
+    monkeypatch.setattr(litellm, "supports_vision", lambda model: True)
+    png = make_tiny_png()
+
+    class ImageEnv(FakeEnv):
+        async def download_file(self, source_path, target_path):
+            from pathlib import Path
+
+            Path(target_path).write_bytes(png)
+
+    agent = make_agent(tmp_path)
+    await agent.run("Task", ImageEnv(), AgentContext())  # type: ignore[arg-type]
+
+    note = REQUEST_TOO_LARGE_MESSAGE.format(error=second)
+    in_context = [
+        m["content"]
+        for m in read_messages(agent)
+        if m.get("role") == "user"
+        and str(m.get("content", "")).startswith("Request failed: ")
+    ]
+    recorded = [
+        s["message"]
+        for s in read_trajectory(agent)["steps"]
+        if (s.get("extra") or {}).get("harness_message") == "request_too_large"
+    ]
+    assert in_context == recorded == [note]
 
 
 async def test_invalid_image_is_removed_and_error_returned_to_model(
     tmp_path, monkeypatch
 ):
-    from harbor_proximus.prompts import INVALID_IMAGE_MESSAGE
+    from openworld_harness.prompts import INVALID_IMAGE_MESSAGE
 
     view = FakeResponse(
         FakeMessage(
@@ -2244,6 +2443,76 @@ async def test_invalid_image_is_removed_and_error_returned_to_model(
     assert notes == [INVALID_IMAGE_MESSAGE.format(error=expected_error)]
     assert "19x2" in notes[0]
     assert "call `view_image` again" in notes[0]
+
+
+async def test_a_request_too_large_note_keeps_the_invalid_image_guidance(
+    tmp_path, monkeypatch
+):
+    """A 413 right after an invalid image adds its note: overwriting the
+    image's would drop the guidance to fix the source image."""
+    from openworld_harness.prompts import (
+        INVALID_IMAGE_MESSAGE,
+        REQUEST_TOO_LARGE_MESSAGE,
+    )
+
+    def view(call_id: str, path: str) -> FakeResponse:
+        return FakeResponse(
+            FakeMessage(
+                content="look",
+                tool_calls=[
+                    FakeToolCall(call_id, "view_image", json.dumps({"path": path}))
+                ],
+            )
+        )
+
+    invalid_image = RuntimeError(
+        '{"code":"invalid_image","error":"Image dimensions 19x2 are too '
+        'small. Both width and height must be at least 8 pixels."}'
+    )
+    too_large = RuntimeError(
+        '{"code":"RequestEntityTooLarge","message":"Request body size '
+        'exceeds maximum allowed size: 10485760 bytes"}'
+    )
+    fake = FakeCompletion(
+        [
+            view("c1", "/app/a.png"),
+            view("c2", "/app/b.png"),
+            invalid_image,
+            too_large,
+            bash_response("echo recovered"),
+            *finish_responses(),
+        ]
+    )
+    monkeypatch.setattr(litellm, "acompletion", fake)
+    monkeypatch.setattr(litellm, "supports_vision", lambda model: True)
+    png = make_tiny_png()
+
+    class ImageEnv(FakeEnv):
+        async def download_file(self, source_path, target_path):
+            from pathlib import Path
+
+            Path(target_path).write_bytes(png)
+
+    agent = make_agent(tmp_path)
+    await agent.run("Task", ImageEnv(), AgentContext())  # type: ignore[arg-type]
+
+    notes = [
+        INVALID_IMAGE_MESSAGE.format(error=invalid_image),
+        REQUEST_TOO_LARGE_MESSAGE.format(error=too_large),
+    ]
+    in_context = [
+        m["content"]
+        for m in read_messages(agent)
+        if m.get("role") == "user"
+        and str(m.get("content", "")).startswith("Request failed: ")
+    ]
+    recorded = [
+        s["message"]
+        for s in read_trajectory(agent)["steps"]
+        if (s.get("extra") or {}).get("harness_message")
+        in {"invalid_image", "request_too_large"}
+    ]
+    assert in_context == recorded == notes
 
 
 async def test_image_count_limit_compacts_instead_of_repeated_eviction(
@@ -2317,7 +2586,7 @@ async def test_image_count_limit_compacts_instead_of_repeated_eviction(
 async def test_request_too_large_without_images_is_fatal(tmp_path, monkeypatch):
     # Nothing evictable means nothing recoverable — the typed error
     # propagates instead of looping forever.
-    from harbor_proximus import llm as llm_mod
+    from openworld_harness import llm as llm_mod
 
     fake = FakeCompletion(
         [RuntimeError("Request body size exceeds maximum allowed size: 10485760 bytes")]
@@ -2335,7 +2604,7 @@ async def test_provider_outage_past_budget_fails_the_run(tmp_path, monkeypatch):
     # and the trial FAILS rather than looking like a clean completion.
     import asyncio
 
-    from harbor_proximus import llm as llm_mod
+    from openworld_harness import llm as llm_mod
 
     calls = {"n": 0}
 
@@ -2378,7 +2647,7 @@ async def test_env_gone_skips_restore(tmp_path, monkeypatch):
 
 
 async def test_finalize_only_on_confirmed_submit(tmp_path, monkeypatch):
-    from harbor_proximus.submissions import Submissions
+    from openworld_harness.submissions import Submissions
 
     fake = FakeCompletion(finish_responses())
     monkeypatch.setattr(litellm, "acompletion", fake)
@@ -2396,11 +2665,11 @@ async def test_finalize_only_on_confirmed_submit(tmp_path, monkeypatch):
 
 
 async def test_finalize_only_skips_budget_exit(tmp_path, monkeypatch):
-    from harbor_proximus.submissions import Submissions
+    from openworld_harness.submissions import Submissions
 
     fake = FakeCompletion([])
     monkeypatch.setattr(litellm, "acompletion", fake)
-    monkeypatch.setattr(Proximus, "_elapsed", lambda self: 4000.0)
+    monkeypatch.setattr(OpenWorldHarness, "_elapsed", lambda self: 4000.0)
     restore = AsyncMock(return_value=True)
     monkeypatch.setattr(Submissions, "restore_winner", restore)
     agent = make_agent(
@@ -2432,3 +2701,112 @@ async def test_confirmed_submit_never_auto_pins_a_new_winner(tmp_path, monkeypat
     assert context.metadata is not None
     assert context.metadata["ended_by_submit"] is True
     assert context.metadata["submitted_commit"] == fake_hash(1)
+
+
+# ----- a sandbox lost at the end of the run (H2) -----
+
+STOPPED = (
+    "executing processes for container: cannot execute in container "
+    '"ta-01M64JTB2H96QMJ9XX335DNVQV" in state stopped'
+)
+
+
+class StoppedEnv(FakeEnv):
+    """The container stops once ``dies_on`` appears in a command: from then
+    on every exec answers 137 with Modal's stopped-container stderr."""
+
+    def __init__(self, dies_on: str, **kwargs):
+        super().__init__(**kwargs)
+        self.dies_on = dies_on
+        self.stopped = False
+
+    async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
+        self.stopped = self.stopped or self.dies_on in command
+        if self.stopped:
+            self.all_commands.append(command)
+            return ExecResult(stdout=None, stderr=STOPPED, return_code=137)
+        return await super().exec(
+            command, cwd=cwd, env=env, timeout_sec=timeout_sec, user=user
+        )
+
+
+async def test_a_stopped_container_ends_the_run_on_the_first_result(
+    tmp_path, monkeypatch
+):
+    fake = FakeCompletion([bash_response("echo alive")])
+    monkeypatch.setattr(litellm, "acompletion", fake)
+
+    agent = make_agent(tmp_path)
+    context = AgentContext()
+    with pytest.raises(EnvironmentGoneError, match="in state stopped"):
+        await agent.run("Do a task", StoppedEnv("echo alive"), context)  # type: ignore[arg-type]
+    assert len(fake.calls) == 1
+    assert context.metadata is not None and context.metadata["env_lost"] is True
+
+
+async def test_death_during_the_exit_submission_fails_the_run(tmp_path, monkeypatch):
+    # The loop ends at its turn limit; the auto-submission finds the container
+    # stopped, so there is nothing left to restore or grade.
+    fake = FakeCompletion([bash_response("echo hi")])
+    monkeypatch.setattr(litellm, "acompletion", fake)
+
+    agent = make_agent(tmp_path, max_turns=1)
+    env = StoppedEnv("rev-parse -q --verify")
+    context = AgentContext()
+    with pytest.raises(EnvironmentGoneError, match="finalizing"):
+        await agent.run("Do a task", env, context)  # type: ignore[arg-type]
+    assert context.metadata is not None
+    assert context.metadata["env_lost"] is True
+    assert context.metadata["submissions"] == []
+    assert not any("end-state" in c for c in env.all_commands)
+
+
+async def test_death_during_the_restore_fails_a_confirmed_run(tmp_path, monkeypatch):
+    fake = FakeCompletion(finish_responses())
+    monkeypatch.setattr(litellm, "acompletion", fake)
+
+    agent = make_agent(tmp_path)
+    context = AgentContext()
+    with pytest.raises(EnvironmentGoneError, match="finalizing"):
+        await agent.run("Do a task", StoppedEnv("refs/proximus/end-state"), context)  # type: ignore[arg-type]
+    assert context.metadata is not None
+    assert context.metadata["ended_by_submit"] is True
+    assert context.metadata["env_lost"] is True
+    assert context.metadata["n_submissions"] == 1
+
+
+async def test_a_provider_error_is_not_masked_by_a_dying_finalize(
+    tmp_path, monkeypatch
+):
+    error = litellm.exceptions.AuthenticationError(
+        message="invalid key", llm_provider="openai", model="gpt-test"
+    )
+    fake = FakeCompletion([bash_response("echo hi"), error])
+    monkeypatch.setattr(litellm, "acompletion", fake)
+
+    agent = make_agent(tmp_path)
+    context = AgentContext()
+    with pytest.raises(litellm.exceptions.AuthenticationError):
+        await agent.run("Do a task", StoppedEnv("rev-parse -q --verify"), context)  # type: ignore[arg-type]
+    assert context.metadata is not None and context.metadata["env_lost"] is True
+
+
+async def test_an_ordinary_restore_failure_does_not_fail_the_run(tmp_path, monkeypatch):
+    fake = FakeCompletion(finish_responses())
+    monkeypatch.setattr(litellm, "acompletion", fake)
+
+    class BadRestoreEnv(FakeEnv):
+        async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
+            if "refs/proximus/end-state" in command:
+                self.all_commands.append(command)
+                return ExecResult(stdout=None, stderr="error: pathspec", return_code=1)
+            return await super().exec(
+                command, cwd=cwd, env=env, timeout_sec=timeout_sec, user=user
+            )
+
+    agent = make_agent(tmp_path)
+    context = AgentContext()
+    await agent.run("Do a task", BadRestoreEnv(), context)  # type: ignore[arg-type]
+    assert context.metadata is not None
+    assert context.metadata["env_lost"] is False
+    assert context.metadata["ended_by_submit"] is True

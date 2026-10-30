@@ -15,8 +15,8 @@ from harbor.agents.factory import AgentFactory
 from harbor.cli.utils import parse_kwargs
 from harbor.models.trial.config import AgentConfig
 
-from harbor_proximus import Proximus, task_agent_kwargs
-from harbor_proximus.config import ProximusConfig
+from openworld_harness import OpenWorldHarness, task_agent_kwargs
+from openworld_harness.config import RUN_ONLY_OPTIONS, OpenWorldConfig
 
 MODEL = "openai/gpt-test"
 # Optional: the tasks/ directory of a FrontierSWE v2 checkout.
@@ -61,13 +61,15 @@ def write_task(task_dir: Path, table: dict[str, Any], header: str = "") -> Path:
 def make_agent(kwargs: dict[str, Any], logs_dir: Path):
     return AgentFactory.create_agent_from_config(
         AgentConfig(
-            import_path="harbor_proximus:Proximus", model_name=MODEL, kwargs=kwargs
+            import_path="openworld_harness:OpenWorldHarness",
+            model_name=MODEL,
+            kwargs=kwargs,
         ),
         logs_dir=logs_dir,
     )
 
 
-# One valid, non-default value per ProximusConfig field. A new field without an
+# One valid, non-default value per OpenWorldConfig field. A new field without an
 # entry here fails test_values_cover_every_field.
 FIELD_VALUES: dict[str, Any] = {
     "time_budget_sec": 1234.5,
@@ -79,6 +81,8 @@ FIELD_VALUES: dict[str, Any] = {
     "reasoning_effort": "high",
     "api_key_env": "PROXIMUS_TIER0_KEY",
     "workspace_git_excludes": ["node_modules", "target"],
+    "static_git_path": "/opt/rwe-eval/git",
+    "large_input_exclude_mb": 100,
     "litellm_model_info": {
         MODEL: {"max_input_tokens": 50000, "supports_vision": True},
         "gpt-test": {"max_input_tokens": 50000, "input_cost_per_token": 1e-06},
@@ -93,13 +97,40 @@ FIELD_VALUES: dict[str, Any] = {
     "api_base": "http://127.0.0.1:9/v1",
     "max_thinking_tokens": 2048,
     "model_info": {"max_input_tokens": 77777, "supports_vision": False},
+    # Web options are run options (as is static_git_path, above): they
+    # round-trip as overrides, not task keys.
+    "web_snapshot_as_of": "2026-06-01T00:00:00Z",
+    "web_max_searches": 7,
+    "web_max_fetches": 9,
+    "web_fetch_chars": 2000,
+    "web_show_dates": True,
+    "web_notes": False,
+    "web_notes_items": 3,
+    "web_extractor_reasoning_effort": "low",
+    "web_gate": False,
+    "web_gate_jaccard": 0.5,
+    "web_gate_novelty": 0.2,
+    "web_gate_patience": 3,
 }
 
 
+def run_only(field: str) -> bool:
+    return field.startswith("web_") or field in RUN_ONLY_OPTIONS
+
+
+def run_overrides(values: dict[str, Any]) -> dict[str, Any]:
+    """The run options among ``values``, with the cutoff that turns on any web
+    options."""
+    web = {k: v for k, v in values.items() if k.startswith("web_")}
+    if web:
+        web = {"web_snapshot_as_of": FIELD_VALUES["web_snapshot_as_of"], **web}
+    return {k: v for k, v in values.items() if k in RUN_ONLY_OPTIONS} | web
+
+
 def test_values_cover_every_field():
-    assert set(FIELD_VALUES) == set(ProximusConfig.model_fields)
+    assert set(FIELD_VALUES) == set(OpenWorldConfig.model_fields)
     for field, value in FIELD_VALUES.items():
-        info = ProximusConfig.model_fields[field]
+        info = OpenWorldConfig.model_fields[field]
         default = info.get_default(call_default_factory=True)
         assert value != default, f"{field}: test value equals the default"
 
@@ -118,10 +149,15 @@ def test_every_field_round_trips_through_task_toml_and_factory(
     if field == "api_key_env":
         monkeypatch.setenv(value, "roundtrip-key")
 
-    kwargs = task_agent_kwargs(write_task(task_dir, {field: value}), MODEL)
-    assert kwargs[field] == expected
-    # No [agent].timeout_sec and no /app artifact: nothing else is defaulted.
-    assert set(kwargs) == {field}
+    if run_only(field):
+        overrides = run_overrides({field: value})
+        kwargs = task_agent_kwargs(write_task(task_dir, {}), MODEL, overrides)
+        assert kwargs == overrides
+    else:
+        kwargs = task_agent_kwargs(write_task(task_dir, {field: value}), MODEL)
+        assert kwargs[field] == expected
+        # No [agent].timeout_sec and no /app artifact: nothing else is defaulted.
+        assert set(kwargs) == {field}
 
     agent = make_agent(kwargs, tmp_path / "logs")
     assert getattr(agent.config, field) == expected
@@ -136,6 +172,10 @@ def test_every_field_round_trips_through_task_toml_and_factory(
         assert "view_image" in agent._tools
     if field == "api_key_env":
         assert agent._llm._api_key == "roundtrip-key"
+    if field.startswith("web_"):
+        assert {"web_search", "web_fetch"} <= set(agent._tools)
+    else:
+        assert not {"web_search", "web_fetch"} & set(agent._tools)
 
 
 def test_all_fields_together(tmp_path, monkeypatch):
@@ -145,7 +185,10 @@ def test_all_fields_together(tmp_path, monkeypatch):
     (task_dir / "prompt.j2").write_text("{{ instruction }}")
     # max_thinking_tokens and reasoning_effort are mutually exclusive.
     values = {k: v for k, v in FIELD_VALUES.items() if k != "max_thinking_tokens"}
-    kwargs = task_agent_kwargs(write_task(task_dir, values), MODEL)
+    table = {k: v for k, v in values.items() if not run_only(k)}
+    kwargs = task_agent_kwargs(
+        write_task(task_dir, table), MODEL, run_overrides(values)
+    )
     agent = make_agent(kwargs, tmp_path / "logs")
     for field, value in values.items():
         if field == "prompt_template_path":
@@ -187,6 +230,14 @@ def test_all_fields_together(tmp_path, monkeypatch):
             f'[agent.proximus.models."{MODEL}"]\nreasoning_efort = "max"\n',
             id="typo-in-model-table",
         ),
+        pytest.param(
+            '[agent.proximus]\nweb_snapshot_as_of = "2026-06-01"\n',
+            id="web-option-in-task-table",
+        ),
+        pytest.param(
+            f'[agent.proximus.models."{MODEL}"]\nweb_max_searches = 3\n',
+            id="web-option-in-model-table",
+        ),
     ],
 )
 def test_bad_task_config_raises_value_error(tmp_path, toml):
@@ -223,7 +274,9 @@ def test_missing_template_fails_before_any_sandbox(tmp_path):
 def test_template_without_instruction_fails_at_preflight(tmp_path):
     (tmp_path / "prompt.j2").write_text("no placeholder here")
     with pytest.raises(ValueError):
-        Proximus.parse_options({"prompt_template_path": str(tmp_path / "prompt.j2")})
+        OpenWorldHarness.parse_options(
+            {"prompt_template_path": str(tmp_path / "prompt.j2")}
+        )
 
 
 def test_thinking_controls_are_exclusive(tmp_path):
@@ -235,7 +288,14 @@ def test_thinking_controls_are_exclusive(tmp_path):
 
 @pytest.mark.parametrize(
     "kwargs",
-    [{"max_turn": 3}, {"max_turns": "three"}, {"compaction_threshold": 0}],
+    [
+        {"max_turn": 3},
+        {"max_turns": "three"},
+        {"compaction_threshold": 0},
+        {"web_max_searches": 3},  # web options without the cutoff
+        {"web_snapshot_as_of": "not a date"},
+        {"web_snapshot_as_of": "2999-01-01"},  # Exa refuses future cutoffs
+    ],
 )
 def test_bad_kwargs_fail_at_construction(tmp_path, kwargs):
     with pytest.raises(ValueError):
@@ -268,7 +328,7 @@ def test_ak_values_validate_with_right_types(tmp_path):
             "api_base=None",
         ]
     )
-    config = ProximusConfig.model_validate(parsed)
+    config = OpenWorldConfig.model_validate(parsed)
     assert config.max_turns == 3 and type(config.max_turns) is int
     assert config.enable_summarize is False
     assert config.llm_call_kwargs == {"timeout": 5}
@@ -303,7 +363,7 @@ def test_frontier_swe_workspace_git_excludes_are_git_wildmatch(task_dir):
     for pattern in kwargs.get("workspace_git_excludes", []):
         assert pattern and not pattern.startswith("./"), pattern
         assert not pattern.endswith("/**"), pattern
-    ProximusConfig.model_validate(kwargs)
+    OpenWorldConfig.model_validate(kwargs)
 
     override = task_agent_kwargs(
         task_dir, MODEL, overrides={"workspace_git_excludes": ["only-this"]}

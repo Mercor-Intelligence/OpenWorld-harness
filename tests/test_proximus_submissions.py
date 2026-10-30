@@ -8,12 +8,12 @@ from pathlib import Path
 import pytest
 from harbor.environments.base import ExecResult
 
-from harbor_proximus.submissions import (
+from openworld_harness.submissions import (
     DEFAULT_SUBMISSION_TIMEOUT_SEC,
     SubmissionError,
     Submissions,
 )
-from harbor_proximus.tools import EnvironmentGoneError
+from openworld_harness.tools import EnvironmentGoneError
 
 pytestmark = pytest.mark.unit
 
@@ -155,7 +155,7 @@ async def test_failed_record_recorded_with_error(tmp_path: Path):
     (row,) = subs.summary()
     assert row["ok"] is False
     assert "not a commit" in row["error"]
-    assert subs.success_count() == 0
+    assert subs.valid_hash_count() == 0
 
 
 async def test_summary_indexes_all_submissions_in_order(tmp_path: Path):
@@ -181,7 +181,7 @@ async def test_winner_hash_is_newest_successful_recording(tmp_path: Path):
     with pytest.raises(SubmissionError):
         await subs.submit("badref")
     assert subs.winner_hash() == f"{2:040x}"
-    assert subs.success_count() == 2
+    assert subs.valid_hash_count() == 2
 
 
 async def test_unwritable_record_path_never_raises(tmp_path: Path):
@@ -204,7 +204,14 @@ async def test_submit_resolves_and_pins_the_ref(tmp_path: Path):
     call = env.exec_calls[0]
     command = call["command"]
     # Script inputs travel as exec env vars, never spliced into the script.
-    assert call["env"] == {**git_safe_env(), "wd": "/app", "commit": "HEAD", "idx": "1"}
+    assert call["env"] == {
+        **git_safe_env(),
+        "wd": "/app",
+        "commit": "HEAD",
+        "idx": "1",
+        "stage_timeout": str(DEFAULT_SUBMISSION_TIMEOUT_SEC - 60),
+        "keep_head": "",
+    }
     # The ref is resolved to a full SHA NOW (HEAD moves, short hashes and
     # branch names drift) and pinned under refs/proximus/submissions/ so
     # a later rebase/reset or `git gc` cannot make it unreachable before
@@ -224,6 +231,20 @@ async def test_submit_honors_configured_ten_minute_timeout(tmp_path: Path):
     assert env.exec_calls[0]["timeout_sec"] == 600
 
 
+@pytest.mark.parametrize(
+    ("submission_timeout", "stage_timeout"), [(600, "540"), (90, "30"), (89, "")]
+)
+async def test_staging_is_bounded_only_when_the_bound_fits(
+    tmp_path: Path, submission_timeout, stage_timeout
+):
+    """The bound plus its cleanup must finish inside the exec's own limit, or
+    the exec kills git first and leaves its index.lock behind."""
+    env = FakeEnv([RECORD_OK])
+    subs = make_submissions(tmp_path, env, submission_timeout_sec=submission_timeout)
+    await subs.submit("HEAD")
+    assert env.exec_calls[0]["env"]["stage_timeout"] == stage_timeout
+
+
 async def test_submit_passes_the_model_ref_out_of_band(tmp_path: Path):
     # The model-controlled ref travels as an exec env var, never spliced
     # into the script text — there is nothing to shell-quote.
@@ -237,17 +258,17 @@ async def test_submit_passes_the_model_ref_out_of_band(tmp_path: Path):
     assert "rm -rf" not in call["command"]
 
 
-async def test_failed_recording_does_not_consume_an_index(tmp_path: Path):
-    # The pin index counts successful recordings only: after a failure the
-    # next success is still submission #1, matching the model-facing note.
+async def test_a_failed_recording_keeps_its_number(tmp_path: Path):
+    # The pin index is the row's number, failed calls included, so the ref,
+    # the model-facing note and list_submissions all agree.
     env = FakeEnv([RECORD_BAD_REF, RECORD_OK])
     subs = make_submissions(tmp_path, env)
     with pytest.raises(SubmissionError):
         await subs.submit("badref")
-    await subs.submit("HEAD")
-    assert env.exec_calls[0]["env"]["idx"] == "1"
-    assert env.exec_calls[1]["env"]["idx"] == "1"
-    assert subs.success_count() == 1
+    submission = await subs.submit("HEAD")
+    assert [call["env"]["idx"] for call in env.exec_calls] == ["1", "2"]
+    assert submission.index == 2
+    assert subs.valid_hash_count() == 1
 
 
 async def test_submit_unknown_ref_reports_model_readable_guidance(tmp_path: Path):
@@ -382,6 +403,88 @@ async def test_valid_hash_count_ignores_empty_and_abbreviated_hashes(tmp_path: P
     await subs.submit("HEAD")
     await subs.submit("HEAD")
 
-    assert subs.success_count() == 3
+    assert [row["ok"] for row in subs.summary()] == [True, True, True]
     assert subs.valid_hash_count() == 1
     assert subs.winner_hash() == RECORD_HASH
+
+
+STOPPED = ExecResult(
+    stdout=None,
+    stderr=(
+        "executing processes for container: cannot execute in container "
+        '"ta-01M64JTB2H96QMJ9XX335DNVQV" in state stopped'
+    ),
+    return_code=137,
+)
+
+
+async def test_a_stopped_container_raises_and_records_nothing(tmp_path: Path):
+    subs = make_submissions(tmp_path, FakeEnv([STOPPED]))
+    with pytest.raises(EnvironmentGoneError, match="in state stopped"):
+        await subs.submit("HEAD")
+    assert subs.summary() == []
+    assert not (tmp_path / "submissions.jsonl").exists()
+
+
+async def test_restore_raises_for_a_dead_sandbox_and_logs_other_failures(
+    tmp_path: Path,
+):
+    subs = make_submissions(tmp_path, FakeEnv([RECORD_OK, STOPPED]))
+    await subs.submit("HEAD")
+    with pytest.raises(EnvironmentGoneError):
+        await subs.restore_winner()
+
+    failing = ExecResult(stdout=None, stderr="error: pathspec", return_code=1)
+    subs = make_submissions(tmp_path / "b", FakeEnv([RECORD_OK, failing]))
+    await subs.submit("HEAD")
+    assert await subs.restore_winner() is False
+
+    class DyingEnv(FakeEnv):
+        async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
+            if "end-state" in command:
+                raise RuntimeError("Modal Sandbox is shutting down.")
+            return await super().exec(command, cwd, env, timeout_sec, user)
+
+    subs = make_submissions(tmp_path / "c", DyingEnv())
+    await subs.submit("HEAD")
+    with pytest.raises(EnvironmentGoneError):
+        await subs.restore_winner()
+
+
+@pytest.mark.parametrize(
+    ("plan", "winner"),
+    [
+        # (record result, auto) per submit call, oldest first.
+        ([(record_ok(1), False), (record_ok(2), True)], f"{2:040x}"),
+        ([(record_ok(1), True)], f"{2:040x}"),
+        ([(RECORD_BAD_REF, False), (record_ok(2), True)], f"{3:040x}"),
+        ([(record_ok(1), False), (record_ok(2), False)], f"{3:040x}"),
+        ([(record_ok(1), True), (record_ok(2), False)], f"{3:040x}"),
+    ],
+)
+async def test_the_model_s_own_submission_wins_over_the_exit_snapshot(
+    tmp_path: Path, plan, winner
+):
+    subs = make_submissions(tmp_path, FakeEnv([result for result, _ in plan]))
+    for _, auto in plan:
+        try:
+            await subs.submit("HEAD", auto=auto)
+        except SubmissionError:
+            pass
+    assert subs.winner_hash() == winner
+
+
+async def test_the_listing_marks_only_the_row_grading_restores(tmp_path: Path):
+    """A zero-exit record with a garbled hash line is an ok row that cannot be
+    restored; the listing must not call it the current result."""
+    from openworld_harness.prompts import submissions_list
+
+    garbled = ExecResult(stdout="subject=step 2\nhash=", stderr=None, return_code=0)
+    subs = make_submissions(tmp_path, FakeEnv([record_ok(1), garbled]))
+    await subs.submit("HEAD")
+    await subs.submit("HEAD")
+    assert [r["ok"] for r in subs.summary()] == [True, True]
+    assert subs.winner_index() == 1 and subs.winner_hash() == f"{2:040x}"
+    listing = submissions_list(subs.summary(), subs.winner_index()).splitlines()
+    assert listing[0].endswith("<- current result")
+    assert "current result" not in listing[1]

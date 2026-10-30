@@ -9,6 +9,10 @@ from pydantic import ConfigDict, Field, field_validator, model_validator
 # long before the budget runs out, and a model request always gets at least
 # this long, so the run can still finish cleanly.
 BUDGET_MARGIN_SEC = 120
+# Options of the web tools (OpenWorldConfig.web_*).
+WEB_OPTION_PREFIX = "web_"
+# Host paths, which a task table may not set (nor the web options).
+RUN_ONLY_OPTIONS = frozenset({"static_git_path"})
 
 
 class ProximusConfig(AgentOptions):
@@ -25,8 +29,10 @@ class ProximusConfig(AgentOptions):
 
     auto_submit_on_exit: bool = True
     """When the run ends, save any unsubmitted work as a final submission, so a
-    run that times out is still graded on its last state. Skipped if nothing
-    changed since the last submission."""
+    run that times out without submitting is still graded on its last state.
+    It is recorded but not graded when the model submitted anything itself.
+    It never moves HEAD or the index, so untracked files survive the restore.
+    Skipped if nothing changed since the last submission."""
 
     restore_on_exit: bool = True
     """When the run ends, check out the winning submission so the verifier sees
@@ -83,8 +89,8 @@ class ProximusConfig(AgentOptions):
     """Fraction of the context limit at which the conversation is summarized."""
 
     disallowed_tools: list[str] = Field(default_factory=list)
-    """Tools to remove: ``list_submissions`` or ``view_image``. ``bash`` and
-    ``submit`` are always available."""
+    """Tools to remove: ``list_submissions``, ``view_image``, ``web_search`` or
+    ``web_fetch``. ``bash`` and ``submit`` are always available."""
 
     prompt_template_path: str | None = None
     """Jinja2 template around the task instruction. It must contain
@@ -122,4 +128,97 @@ class ProximusConfig(AgentOptions):
                 "set either max_thinking_tokens or reasoning_effort, not both: "
                 "LiteLLM maps both onto the provider's thinking setting"
             )
+        return self
+
+
+class OpenWorldConfig(ProximusConfig):
+    """Options of OpenWorldHarness: the Proximus core's, plus the fork's."""
+
+    static_git_path: str | None = None
+    """Host path of a statically linked ``git``. When the sandbox has no git,
+    setup copies it to /usr/local/bin/git, so submissions work in images that
+    ship none. Unset, such an image fails at setup."""
+
+    large_input_exclude_mb: int | None = Field(default=None, ge=1)
+    """Files already in a fresh workspace (not a git repository) that are larger
+    than this many MB are added to ``workspace_git_excludes`` at setup, so the
+    baseline commit never hashes multi-GB inputs. The files stay in place."""
+
+    web_snapshot_as_of: str | None = None
+    """Turns on ``web_search`` and ``web_fetch`` over Exa Snapshot, pinned to
+    this cutoff: an ISO 8601 date or date-time (UTC); pages are seen as Exa
+    stored them at or before it. Never shown to the model. Exa documents a
+    rolling window of about five months. Needs ``EXA_API_KEY`` in Harbor's agent
+    env or the runner's environment; the tools run in the runner, so the key
+    never enters the sandbox. The other ``web_*`` options need it set."""
+
+    web_max_searches: int = Field(default=50, ge=1)
+    """Exa search requests allowed per run. An identical repeated query is served
+    again without a request."""
+
+    web_max_fetches: int = Field(default=100, ge=1)
+    """Exa page requests allowed per run. Further windows of a fetched page are
+    free."""
+
+    web_fetch_chars: int = Field(default=10_000, ge=1_000)
+    """Characters of page text per ``web_fetch`` call; ``offset`` reads further."""
+
+    web_show_dates: bool = False
+    """Show pages' published dates. Off by default: in a snapshot they cluster
+    just below the cutoff, so they would tell the model roughly when it is."""
+
+    web_notes: bool = True
+    """Keep the belief state: an extractor call (the agent's model) after each
+    observation that has something new, the notes returned with web results when
+    they change and re-injected at compaction."""
+
+    web_notes_items: int = Field(default=6, ge=1)
+    """Notes kept by a reorganization, which runs once there are more than this
+    plus 4."""
+
+    web_extractor_reasoning_effort: str | None = None
+    """Reasoning effort for the extractor calls. None uses the provider's
+    default; effort and thinking settings in ``llm_call_kwargs`` do not apply to
+    them."""
+
+    web_gate: bool = True
+    """Halt stagnant searches (the exhaustion gate). When off, the gate still
+    records where it would have fired."""
+
+    web_gate_jaccard: float = Field(default=0.6, ge=0, le=1)
+    """Gate: a search is a near-repeat when its token Jaccard against one of the
+    last three queries is at least this."""
+
+    web_gate_novelty: float = Field(default=0.3, ge=0, le=1)
+    """Gate: and stagnant when at most this share of its results are pages not
+    seen before."""
+
+    web_gate_patience: int = Field(default=2, ge=1)
+    """Gate: stagnant searches in a row that fire it."""
+
+    @field_validator("web_snapshot_as_of")
+    @classmethod
+    def _as_of(cls, value: str | None) -> str | None:
+        from openworld_harness.web.exa import normalize_as_of
+
+        return None if value is None else normalize_as_of(value)
+
+    @model_validator(mode="after")
+    def _web_options_need_a_cutoff(self) -> Self:
+        if self.web_snapshot_as_of is None:
+            # Changed from the default, not merely given: a dumped no-web config
+            # (every field set) validates again.
+            fields = type(self).model_fields
+            stray = sorted(
+                f
+                for f in self.model_fields_set
+                if f.startswith(WEB_OPTION_PREFIX)
+                and f != "web_snapshot_as_of"
+                and getattr(self, f) != fields[f].get_default()
+            )
+            if stray:
+                raise ValueError(
+                    f"{', '.join(stray)} need web_snapshot_as_of, which turns the "
+                    "web tools on"
+                )
         return self

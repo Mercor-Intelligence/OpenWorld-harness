@@ -227,7 +227,7 @@ async def test_confirm_with_a_new_commit_records_it(tmp_path, monkeypatch):
 async def test_unknown_commit_fails_readably_and_keeps_prior_winner(
     tmp_path, monkeypatch
 ):
-    # Bad ref first (arms but records nothing), work resets the gate, then a
+    # Bad ref first (records nothing, so it does not arm), some work, then a
     # good submission is recorded and confirmed.
     fake = FakeCompletion(
         [
@@ -252,6 +252,66 @@ async def test_unknown_commit_fails_readably_and_keeps_prior_winner(
     assert context.metadata["n_submissions"] == 1
     assert [r["ok"] for r in context.metadata["submissions"]] == [False, True]
     assert context.metadata["submitted_commit"] == HEAD_HASH
+
+
+async def test_failed_submit_does_not_arm_the_confirmation(tmp_path, monkeypatch):
+    # A garbled hash, then the corrected submit: the correction records and
+    # arms; it must not count as the confirmation of the failed call.
+    fake = FakeCompletion(
+        [
+            git_submit_response(commit="badref"),
+            git_submit_response(call_id="call_a"),
+            git_submit_response(call_id="call_b"),
+        ]
+    )
+    monkeypatch.setattr(litellm, "acompletion", fake)
+
+    agent = make_agent(tmp_path, time_budget_sec=7200)
+    context = AgentContext()
+    await agent.run("Task", GitEnv(), context)  # type: ignore[arg-type]
+
+    tools = [m["content"] for m in read_messages(agent) if m.get("role") == "tool"]
+    assert len(fake.calls) == 3
+    assert "not a commit in the workspace repository" in tools[0]
+    assert "Nothing was recorded by this call and the run continues" in tools[0]
+    assert "time budget remains" in tools[0]
+    assert "confirm this as your final submission" not in tools[0]
+    # Numbered like list_submissions' rows: the failed call was #1.
+    assert "Submission #2 recorded" in tools[1]
+    assert "confirm this as your final submission" in tools[1]
+    assert "Final submission confirmed" not in tools[1]
+    assert "Final submission confirmed" in tools[2]
+    assert context.metadata is not None
+    assert [r["ok"] for r in context.metadata["submissions"]] == [False, True]
+
+
+async def test_failed_confirm_cancels_the_pending_confirmation(tmp_path, monkeypatch):
+    # good submit (arms) -> bad submit on the next turn: it would have
+    # confirmed, but it recorded nothing, so the run continues unarmed.
+    fake = FakeCompletion(
+        [
+            git_submit_response(),
+            git_submit_response(commit="badref", call_id="call_bad"),
+            git_submit_response(call_id="call_c"),
+            git_submit_response(call_id="call_d"),
+        ]
+    )
+    monkeypatch.setattr(litellm, "acompletion", fake)
+
+    agent = make_agent(tmp_path)
+    context = AgentContext()
+    await agent.run("Task", GitEnv(), context)  # type: ignore[arg-type]
+
+    tools = [m["content"] for m in read_messages(agent) if m.get("role") == "tool"]
+    assert len(fake.calls) == 4
+    assert "previous submission (#1) remains your recorded result" in tools[1]
+    assert "Nothing was recorded by this call" in tools[1]
+    assert "Final submission confirmed" not in tools[1]
+    assert "Submission #3 recorded" in tools[2]
+    assert "confirm this as your final submission" in tools[2]
+    assert "Final submission confirmed" in tools[3]
+    assert context.metadata is not None
+    assert [r["ok"] for r in context.metadata["submissions"]] == [True, False, True]
 
 
 async def test_failed_record_after_a_good_one_names_the_prior_winner(
@@ -349,7 +409,7 @@ async def test_list_submissions_shows_store_rows_and_winner(tmp_path, monkeypatc
 def _make_submissions(tmp_path, env):
     import logging
 
-    from harbor_proximus.submissions import Submissions
+    from openworld_harness.submissions import Submissions
 
     return Submissions(
         tmp_path,
@@ -479,7 +539,7 @@ async def test_run_end_without_submit_auto_pins_final_state(tmp_path, monkeypatc
     then budget exhaustion) still leaves its last workspace state on the
     submissions rail — recorded via the exact argless submit() path, flagged
     ``auto`` in submissions.jsonl, winner for the exit restore."""
-    from harbor_proximus.proximus import EMPTY_TURN_STALL_LIMIT
+    from openworld_harness.proximus import EMPTY_TURN_STALL_LIMIT
     from tests.test_proximus_loop import empty_response
 
     fake = FakeCompletion(
@@ -506,6 +566,65 @@ async def test_run_end_without_submit_auto_pins_final_state(tmp_path, monkeypatc
     assert rows[-1]["auto"] is True and rows[-1]["ok"] is True
 
 
+async def test_timeout_after_a_submit_is_graded_on_the_submit(tmp_path, monkeypatch):
+    """submit, more work, then the turn limit: the exit snapshot of the
+    changed tree is recorded, but the model's own submission is what the
+    restore checks out and what grading uses (H7)."""
+    fake = FakeCompletion([git_submit_response(), bash_response("echo edit")])
+    monkeypatch.setattr(litellm, "acompletion", fake)
+
+    class EditedEnv(GitEnv):
+        # The tree changed after the submit: a bare probe does not match, and
+        # the exit snapshot pins a new commit.
+        async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
+            if 'echo "matched"' in command:
+                self.all_commands.append(command)
+                self.all_envs.append(dict(env or {}))
+                return ExecResult(stdout=None, stderr=None, return_code=1)
+            if "rev-parse -q --verify" in command and any(
+                "rev-parse -q --verify" in c and 'echo "matched"' not in c
+                for c in self.all_commands
+            ):
+                self.all_commands.append(command)
+                self.all_envs.append(dict(env or {}))
+                return ExecResult(
+                    stdout=f"subject=snapshot\nhash={FIX2_HASH}",
+                    stderr=None,
+                    return_code=0,
+                )
+            return await super().exec(
+                command, cwd=cwd, env=env, timeout_sec=timeout_sec, user=user
+            )
+
+    agent = make_agent(tmp_path, max_turns=2)
+    env = EditedEnv()
+    context = AgentContext()
+    await agent.run("Task", env, context)  # type: ignore[arg-type]
+
+    assert context.metadata is not None
+    rows = context.metadata["submissions"]
+    assert [(r["ok"], bool(r.get("auto")), r["hash"]) for r in rows] == [
+        (True, False, HEAD_HASH),
+        (True, True, FIX2_HASH),
+    ]
+    assert context.metadata["submitted_commit"] == HEAD_HASH
+    restore = [e for c, e in zip(env.all_commands, env.all_envs) if "end-state" in c]
+    assert [e["winner"] for e in restore] == [HEAD_HASH]
+
+
+def test_listing_marks_the_row_grading_restores():
+    from openworld_harness.prompts import submissions_list
+
+    rows = [
+        {"index": 1, "ok": True, "hash": HEAD_HASH, "elapsed_sec": 60},
+        {"index": 2, "ok": True, "hash": FIX2_HASH, "elapsed_sec": 90, "auto": True},
+    ]
+    listing = submissions_list(rows, 1).splitlines()
+    assert listing[0].endswith("<- current result")
+    assert "current result" not in listing[1]
+    assert "current result" not in submissions_list(rows, None)
+
+
 async def test_clean_double_submit_end_gets_no_auto_submission(tmp_path, monkeypatch):
     """When the run ends via the confirm protocol and the tree still matches
     the winner, the exit path must NOT grow a duplicate submission."""
@@ -529,7 +648,7 @@ async def test_ensure_git_threads_workspace_excludes(tmp_path):
     paths anyway, so tracking them would only bloat every submission."""
     import logging
 
-    from harbor_proximus.submissions import Submissions
+    from openworld_harness.submissions import Submissions
 
     env = GitEnv()
     store = Submissions(

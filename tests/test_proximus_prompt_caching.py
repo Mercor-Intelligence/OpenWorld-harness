@@ -26,8 +26,8 @@ import httpx
 import pytest
 from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler
 
-from harbor_proximus.config import ProximusConfig
-from harbor_proximus.llm import LLM, _AnthropicFallbackHTTPHandler
+from openworld_harness.config import ProximusConfig
+from openworld_harness.llm import LLM, _AnthropicFallbackHTTPHandler
 
 
 def _llm() -> LLM:

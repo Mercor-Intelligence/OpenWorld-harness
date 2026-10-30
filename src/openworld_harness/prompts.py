@@ -5,17 +5,17 @@ from typing import Any
 
 from harbor.models.task.config import NetworkMode
 
-from harbor_proximus import utils
-from harbor_proximus.timer import DEADLINE_PATH
+from openworld_harness import utils
+from openworld_harness.timer import DEADLINE_PATH
 
-SUMMARY_REQUEST = """Pause the task. Produce a comprehensive handoff summary of your work so far for another agent who will continue without your conversation history. Cover:
+SUMMARY_REQUEST = """Context checkpoint (routine context management; the task is not paused or finished). Your earlier messages are about to be replaced by the handoff summary you write now, and you will continue the task immediately afterwards with the same tools and the remaining time budget, without this conversation history. Write a comprehensive handoff summary of your work so far. Cover:
 1. Major actions completed and their outcomes.
 2. Key findings: important file paths, commands, configurations, error messages, measurements.
 3. Files created or modified so far, and the role of each.
 4. Current status: what is verified working, what is in progress.
 5. Precise next steps, with rationale.
 6. Pitfalls to avoid.
-Be specific and factual. Do not call any tools."""
+Be specific and factual. Reply with the summary only; do not call any tools in this reply."""
 
 HANDOFF_HEADER = (
     "[Context compacted] Your earlier conversation history was summarized to "
@@ -45,6 +45,12 @@ SUBMIT_CONFIRMED = "Final submission confirmed. Ending the session."
 SUBMIT_FALLBACK = (
     "The final workspace state at the end of the run will be used as your "
     "result instead."
+)
+
+# A failed submit records nothing, so it never offers to end the run.
+SUBMIT_RETRY = (
+    "Nothing was recorded by this call and the run continues; fix the problem "
+    "and call submit again."
 )
 
 # Deliberately says NOTHING about multiple submissions or the two-submit ending:
@@ -199,18 +205,25 @@ def handoff_message(
     return "\n\n".join(parts)
 
 
-def submit_guidance(elapsed: float, budget: float | None) -> str:
-    """Continue-or-confirm guidance for a non-final submit, with the
-    time-left sentence when a budget exists."""
+def time_left(elapsed: float, budget: float | None) -> str | None:
+    """The time-left sentence, or None without a budget."""
     if not budget:
-        return SUBMIT_CONTINUE_OR_CONFIRM
+        return None
     remaining = max(0.0, budget - elapsed)
-    time_left = SUBMIT_TIME_LEFT.format(
+    return SUBMIT_TIME_LEFT.format(
         remaining=fmt_duration(remaining),
         budget=fmt_duration(budget),
         percent_left=round(100 * remaining / budget),
     )
-    return f"{time_left} {SUBMIT_CONTINUE_OR_CONFIRM}"
+
+
+def submit_guidance(elapsed: float, budget: float | None) -> str:
+    """Continue-or-confirm guidance for a non-final submit, with the
+    time-left sentence when a budget exists."""
+    left = time_left(elapsed, budget)
+    return (
+        f"{left} {SUBMIT_CONTINUE_OR_CONFIRM}" if left else SUBMIT_CONTINUE_OR_CONFIRM
+    )
 
 
 def submission_note(n: int, commit: str, subject: str) -> str:
@@ -218,27 +231,38 @@ def submission_note(n: int, commit: str, subject: str) -> str:
     return f"Submission #{n} recorded from commit {commit[:12]}{subject_clause}."
 
 
-def submission_failed(detail: str, prior_submissions: int = 0) -> str:
-    """With an earlier recorded submission the winner is that commit, not
-    the final workspace state — the fallback sentence must stay truthful."""
-    if prior_submissions:
+def submission_failed(detail: str, winner: int = 0) -> str:
+    """With an earlier recorded submission (``winner``, its list_submissions
+    number) the result is that commit, not the final workspace state — the
+    fallback sentence must stay truthful."""
+    if winner:
         return (
             f"Submission could not be recorded ({detail}). Your previous "
-            f"submission (#{prior_submissions}) remains your recorded result."
+            f"submission (#{winner}) remains your recorded result."
         )
     return f"Submission could not be recorded ({detail}). {SUBMIT_FALLBACK}"
 
 
-def submissions_list(rows: list[dict[str, Any]]) -> str:
-    """One line per submit call, newest last, with the currently scored
-    commit marked."""
+def submission_retry(
+    detail: str, winner: int, elapsed: float, budget: float | None
+) -> str:
+    """A submit that failed to record: what failed, what stays recorded, that
+    the run continues, and the time left."""
+    parts = [submission_failed(detail, winner), SUBMIT_RETRY]
+    left = time_left(elapsed, budget)
+    if left:
+        parts.append(left)
+    return " ".join(parts)
+
+
+def submissions_list(rows: list[dict[str, Any]], winner: int | None) -> str:
+    """One line per submit call, newest last, with the currently scored row
+    (``Submissions.winner_index``) marked."""
     if not rows:
         return (
             "No submissions recorded yet. If you never submit, the workspace "
             "state at the end of the run is your result."
         )
-    ok_indices = [r["index"] for r in rows if r.get("ok")]
-    winner = ok_indices[-1] if ok_indices else None
     lines = []
     for row in rows:
         line = f"#{row['index']}  {(row.get('hash') or '')[:12] or '????'}"

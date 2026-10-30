@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 from harbor.models.task.config import TaskConfig
 
-from harbor_proximus import task_agent_kwargs
+from openworld_harness import task_agent_kwargs
 
 TOML = """
 [agent]
@@ -41,6 +41,46 @@ def test_task_table_and_budget_default(tmp_path):
         "llm_call_kwargs": {"extra_body": {"a": 1, "b": 2}},
         "time_budget_sec": 7200.0,
     }
+
+
+def test_openworld_table_reads_like_the_legacy_one(tmp_path):
+    legacy = task_agent_kwargs(task(tmp_path), "anthropic/claude-opus-5")
+    renamed = TOML.replace("[agent.proximus", "[agent.openworld")
+    assert task_agent_kwargs(task(tmp_path, renamed), "anthropic/claude-opus-5") == (
+        legacy
+    )
+
+
+def test_a_web_option_error_names_its_table(tmp_path):
+    text = '[agent.openworld.models."m"]\nweb_max_searches = 3\n'
+    with pytest.raises(ValueError, match=r'\[agent\.openworld\.models\."m"\] in'):
+        task_agent_kwargs(task(tmp_path, text), "m")
+
+
+def test_a_task_table_cannot_name_a_host_file(tmp_path):
+    # The runner picks which host file is copied into the sandbox.
+    text = '[agent.openworld]\nstatic_git_path = "/home/runner/.netrc"\n'
+    with pytest.raises(ValueError, match="static_git_path: web options and host"):
+        task_agent_kwargs(task(tmp_path, text), "m")
+    kwargs = task_agent_kwargs(
+        task(tmp_path), "m", defaults={"static_git_path": "/opt/git"}
+    )
+    assert kwargs["static_git_path"] == "/opt/git"
+
+
+def test_a_dumped_no_web_config_validates_again():
+    from openworld_harness.config import OpenWorldConfig
+
+    dumped = OpenWorldConfig(time_budget_sec=60).model_dump()
+    assert OpenWorldConfig.model_validate(dumped).web_snapshot_as_of is None
+    with pytest.raises(ValueError, match="need web_snapshot_as_of"):
+        OpenWorldConfig(web_max_searches=3)
+
+
+def test_both_tables_are_rejected(tmp_path):
+    text = TOML + '\n[agent.openworld]\nreasoning_effort = "low"\n'
+    with pytest.raises(ValueError, match="not both"):
+        task_agent_kwargs(task(tmp_path, text), "m")
 
 
 def test_model_table_then_overrides_win_per_nested_key(tmp_path):

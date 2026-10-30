@@ -2,7 +2,7 @@ import logging
 
 from harbor.environments.base import BaseEnvironment
 
-from harbor_proximus import utils
+from openworld_harness import utils
 
 _TIMER_MISSING = "missing"
 DEADLINE_PATH = "/tmp/proximus/deadline"
