@@ -78,7 +78,9 @@ def test_notes_parse_dedupe_and_stay_bounded() -> None:
     assert notes.items == ["x", "y"]
     notes.items = [str(i) for i in range(9)]
     notes.keep_newest()
-    assert notes.items == [str(i) for i in range(3, 9)]
+    assert notes.items == ["7", "8"]
+    notes.add(["new"])  # a failed reorganization is not retried on the next note
+    assert not notes.needs_reorganizing()
     # An overlong note is shortened in the middle and keeps its source.
     long_note = "x" * 700 + " (https://docs.example/api)"
     (clipped,) = cgdp.parse_notes(f"- {long_note}")

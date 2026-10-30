@@ -128,9 +128,11 @@ class Notes:
         self.version += 1
 
     def keep_newest(self) -> None:
-        """The fallback when reorganization fails: stay bounded, keep the latest findings."""
+        """The fallback when reorganization fails: stay bounded, keep the latest
+        findings. Down to ``target``, as a reorganization would: trimmed only to
+        ``trigger``, the next note would ask for another one at once."""
         if len(self.items) > self.trigger:
-            self.items = self.items[-self.trigger :]
+            self.items = self.items[-self.target :]
             self.version += 1
 
     def render(self) -> str:
