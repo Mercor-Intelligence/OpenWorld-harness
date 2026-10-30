@@ -611,18 +611,17 @@ async def test_timeout_after_a_submit_is_graded_on_the_submit(tmp_path, monkeypa
     assert [e["winner"] for e in restore] == [HEAD_HASH]
 
 
-def test_listing_marks_the_model_s_own_submission():
+def test_listing_marks_the_row_grading_restores():
     from openworld_harness.prompts import submissions_list
 
     rows = [
         {"index": 1, "ok": True, "hash": HEAD_HASH, "elapsed_sec": 60},
         {"index": 2, "ok": True, "hash": FIX2_HASH, "elapsed_sec": 90, "auto": True},
     ]
-    listing = submissions_list(rows).splitlines()
+    listing = submissions_list(rows, 1).splitlines()
     assert listing[0].endswith("<- current result")
     assert "current result" not in listing[1]
-    only_auto = submissions_list([rows[1]]).splitlines()
-    assert only_auto[0].endswith("<- current result")
+    assert "current result" not in submissions_list(rows, None)
 
 
 async def test_clean_double_submit_end_gets_no_auto_submission(tmp_path, monkeypatch):

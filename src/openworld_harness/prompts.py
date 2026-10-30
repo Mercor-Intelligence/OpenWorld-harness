@@ -254,18 +254,14 @@ def submission_retry(
     return " ".join(parts)
 
 
-def submissions_list(rows: list[dict[str, Any]]) -> str:
-    """One line per submit call, newest last, with the currently scored
-    commit marked."""
+def submissions_list(rows: list[dict[str, Any]], winner: int | None) -> str:
+    """One line per submit call, newest last, with the currently scored row
+    (``Submissions.winner_index``) marked."""
     if not rows:
         return (
             "No submissions recorded yet. If you never submit, the workspace "
             "state at the end of the run is your result."
         )
-    # The rule of Submissions.winner_hash: the model's own submissions first.
-    ok_rows = [r for r in rows if r.get("ok")]
-    chosen = [r for r in ok_rows if not r.get("auto")] or ok_rows
-    winner = chosen[-1]["index"] if chosen else None
     lines = []
     for row in rows:
         line = f"#{row['index']}  {(row.get('hash') or '')[:12] or '????'}"

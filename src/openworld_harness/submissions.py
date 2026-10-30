@@ -263,11 +263,7 @@ class Submissions:
             for entry in self._submissions
         ]
 
-    def winner_hash(self) -> str | None:
-        """The commit grading restores: the newest successful submission the
-        model made, else the newest end-of-run auto-submission. A run that
-        times out after submitting is graded on what the model submitted, not
-        on a half-finished edit; the auto row stays on the record."""
+    def _winner(self) -> dict[str, Any] | None:
         winners = [
             entry
             for entry in self._submissions
@@ -276,7 +272,20 @@ class Submissions:
             and _FULL_COMMIT_OID.fullmatch(entry["hash"]) is not None
         ]
         chosen = [entry for entry in winners if not entry.get("auto")] or winners
-        return chosen[-1]["hash"] if chosen else None
+        return chosen[-1] if chosen else None
+
+    def winner_hash(self) -> str | None:
+        """The commit grading restores: the newest successful submission the
+        model made, else the newest end-of-run auto-submission. A run that
+        times out after submitting is graded on what the model submitted, not
+        on a half-finished edit; the auto row stays on the record."""
+        winner = self._winner()
+        return None if winner is None else winner["hash"]
+
+    def winner_index(self) -> int | None:
+        """The ``index`` of the row ``winner_hash`` comes from."""
+        winner = self._winner()
+        return None if winner is None else winner["index"]
 
     async def restore_winner(self) -> bool:
         """Restore the winning commit; True once the workspace holds it. A

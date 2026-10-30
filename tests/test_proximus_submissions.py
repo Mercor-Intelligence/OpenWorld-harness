@@ -471,3 +471,19 @@ async def test_the_model_s_own_submission_wins_over_the_exit_snapshot(
         except SubmissionError:
             pass
     assert subs.winner_hash() == winner
+
+
+async def test_the_listing_marks_only_the_row_grading_restores(tmp_path: Path):
+    """A zero-exit record with a garbled hash line is an ok row that cannot be
+    restored; the listing must not call it the current result."""
+    from openworld_harness.prompts import submissions_list
+
+    garbled = ExecResult(stdout="subject=step 2\nhash=", stderr=None, return_code=0)
+    subs = make_submissions(tmp_path, FakeEnv([record_ok(1), garbled]))
+    await subs.submit("HEAD")
+    await subs.submit("HEAD")
+    assert [r["ok"] for r in subs.summary()] == [True, True]
+    assert subs.winner_index() == 1 and subs.winner_hash() == f"{2:040x}"
+    listing = submissions_list(subs.summary(), subs.winner_index()).splitlines()
+    assert listing[0].endswith("<- current result")
+    assert "current result" not in listing[1]

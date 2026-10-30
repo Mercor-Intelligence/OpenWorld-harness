@@ -547,7 +547,11 @@ class Proximus(BaseAgent):
         return await self._executor.view_image(args)
 
     async def _list_submissions(self, _: tools.NoArgs) -> tools.ToolResult:
-        return tools.ToolResult(prompts.submissions_list(self._submissions.summary()))
+        return tools.ToolResult(
+            prompts.submissions_list(
+                self._submissions.summary(), self._submissions.winner_index()
+            )
+        )
 
     async def _auto_final_submission(self) -> None:
         """Pin the end-of-run workspace as a final submission — the exact
