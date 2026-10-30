@@ -236,8 +236,9 @@ final submit.
 `EXA_API_KEY` must be in the environment of the process that runs the agent. A run with
 `web_snapshot_as_of` and no key fails at the start instead of running without the web tools.
 The tools read the key there and never put it in Harbor's agent env, so it never reaches the
-sandbox. `OpenWorldHarness.web_host_key_envs` names it, so a runner can pass it to the host
-process only when the web tools are on.
+sandbox; if a runner passes it in the agent env anyway, sandbox commands see it blanked, like
+the model keys. `OpenWorldHarness.web_host_key_envs` names it, so a runner can pass it to the
+host process only when the web tools are on.
 
 Known limits:
 

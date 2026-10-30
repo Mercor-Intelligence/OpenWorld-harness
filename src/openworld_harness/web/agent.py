@@ -230,6 +230,13 @@ class WebTools(Proximus):
         return self.config.web_snapshot_as_of is not None
 
     @override
+    def _sandbox_hidden_env_keys(self) -> set[str]:
+        # Also when a runner passes the Exa key in Harbor's agent env, which
+        # Harbor overlays on every sandbox exec.
+        keys = super()._sandbox_hidden_env_keys()
+        return keys | set(self.web_host_key_envs) if self.web_enabled else keys
+
+    @override
     def build_tools(self) -> dict[str, tools.Tool]:
         surface = super().build_tools()
         if not self.web_enabled:

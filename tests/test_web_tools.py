@@ -1114,3 +1114,17 @@ async def test_web_is_off_without_a_cutoff(
     agent._populate_context(context)
     assert context.metadata is not None and "web" not in context.metadata
     assert not (tmp_path / "agent" / web_agent.WEB_LOG).exists()
+
+
+def test_the_exa_key_is_hidden_from_sandbox_commands_only_with_web(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent = make_agent(tmp_path, monkeypatch)
+    assert agent._sandbox_hidden_env_keys() == {
+        *agent._llm.consumed_env_keys,
+        web_agent.EXA_KEY_ENV,
+    }
+    plain = OpenWorldHarness(
+        logs_dir=tmp_path / "plain", model_name=MODEL, time_budget_sec=3600
+    )
+    assert web_agent.EXA_KEY_ENV not in plain._sandbox_hidden_env_keys()

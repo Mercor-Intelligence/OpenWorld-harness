@@ -146,11 +146,15 @@ class Proximus(BaseAgent):
         with self._sandbox_credential_scope(environment):
             await self._run_task(instruction, environment, context)
 
+    def _sandbox_hidden_env_keys(self) -> set[str]:
+        """Host-side credentials that sandbox commands must not see."""
+        return set(self._llm.consumed_env_keys)
+
     def _sandbox_credential_scope(
         self, environment: BaseEnvironment
     ) -> contextlib.AbstractContextManager:
-        """Hide host-side model credentials from sandbox commands."""
-        hidden = {name: "" for name in sorted(self._llm.consumed_env_keys)}
+        """Hide host-side credentials from sandbox commands."""
+        hidden = {name: "" for name in sorted(self._sandbox_hidden_env_keys())}
         scope = getattr(environment, "scoped_exec_env", None)
         return scope(hidden) if hidden and scope else contextlib.nullcontext()
 
