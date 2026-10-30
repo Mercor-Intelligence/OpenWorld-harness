@@ -61,15 +61,16 @@ class Submissions:
         self._submission_timeout_sec = int(submission_timeout_sec)
         self._submissions: list[dict[str, Any]] = []
 
-    def _git_exec(self, script: str, env: dict[str, str], timeout_sec: int):
-        """Run a harness git script as root, not as the agent user.
+    async def _git_exec(self, script: str, env: dict[str, str], timeout_sec: int):
+        """Run a harness git script as root, not as the agent user. A result
+        from a stopped container raises EnvironmentGoneError.
 
         Root git refuses the agent-owned workspace repo ("dubious ownership")
         unless safe.directory covers it. Injected as GIT_CONFIG_* env — every
         git subcommand in every script inherits it, on any task image, without
         mutating the image's git config. Without it, every submit fails on
         an image that lacks the setting, and the trial is left ungradable."""
-        return self._environment.exec(
+        result = await self._environment.exec(
             script,
             env={
                 "GIT_CONFIG_COUNT": "1",
@@ -80,6 +81,8 @@ class Submissions:
             timeout_sec=timeout_sec,
             user="root",
         )
+        tools.raise_if_exec_result_gone(result)
+        return result
 
     async def ensure_git(self) -> None:
         """Make the workspace a git repository."""
@@ -256,7 +259,8 @@ class Submissions:
         return winners[-1] if winners else None
 
     async def restore_winner(self) -> bool:
-        """Restore the winning commit; True once the workspace holds it."""
+        """Restore the winning commit; True once the workspace holds it. A
+        dead sandbox raises EnvironmentGoneError; other failures are logged."""
         winner = self.winner_hash()
         if not winner:
             self._logger.warning("Winner restore skipped: no valid submission exists.")
@@ -267,7 +271,10 @@ class Submissions:
                 {"wd": self._workdir, "winner": winner},
                 RESTORE_TIMEOUT_SEC,
             )
+        except tools.EnvironmentGoneError:
+            raise
         except Exception as e:
+            tools.raise_if_environment_gone(e)
             self._logger.warning(f"Winner restore failed: {e}")
             return False
         if result.return_code != 0:

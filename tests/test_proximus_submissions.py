@@ -385,3 +385,46 @@ async def test_valid_hash_count_ignores_empty_and_abbreviated_hashes(tmp_path: P
     assert subs.success_count() == 3
     assert subs.valid_hash_count() == 1
     assert subs.winner_hash() == RECORD_HASH
+
+
+STOPPED = ExecResult(
+    stdout=None,
+    stderr=(
+        "executing processes for container: cannot execute in container "
+        '"ta-01M64JTB2H96QMJ9XX335DNVQV" in state stopped'
+    ),
+    return_code=137,
+)
+
+
+async def test_a_stopped_container_raises_and_records_nothing(tmp_path: Path):
+    subs = make_submissions(tmp_path, FakeEnv([STOPPED]))
+    with pytest.raises(EnvironmentGoneError, match="in state stopped"):
+        await subs.submit("HEAD")
+    assert subs.summary() == []
+    assert not (tmp_path / "submissions.jsonl").exists()
+
+
+async def test_restore_raises_for_a_dead_sandbox_and_logs_other_failures(
+    tmp_path: Path,
+):
+    subs = make_submissions(tmp_path, FakeEnv([RECORD_OK, STOPPED]))
+    await subs.submit("HEAD")
+    with pytest.raises(EnvironmentGoneError):
+        await subs.restore_winner()
+
+    failing = ExecResult(stdout=None, stderr="error: pathspec", return_code=1)
+    subs = make_submissions(tmp_path / "b", FakeEnv([RECORD_OK, failing]))
+    await subs.submit("HEAD")
+    assert await subs.restore_winner() is False
+
+    class DyingEnv(FakeEnv):
+        async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
+            if "end-state" in command:
+                raise RuntimeError("Modal Sandbox is shutting down.")
+            return await super().exec(command, cwd, env, timeout_sec, user)
+
+    subs = make_submissions(tmp_path / "c", DyingEnv())
+    await subs.submit("HEAD")
+    with pytest.raises(EnvironmentGoneError):
+        await subs.restore_winner()

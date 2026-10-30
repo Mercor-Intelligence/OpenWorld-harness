@@ -23,6 +23,9 @@ class EnvironmentGoneError(RuntimeError):
 _GONE_EXCEPTION_NAMES = frozenset(
     {
         "SandboxTerminatedError",  # modal: OOM, preemption, kill
+        # harbor's modal environment: an operation failed and the sandbox
+        # itself had exited with 137 (sandbox.poll()), i.e. an OOM kill
+        "SandboxLikelyOutOfMemoryError",
         "SandboxTimeoutError",  # modal: sandbox lifetime expired
         "DaytonaNotFoundError",  # daytona: sandbox 404
         "SandboxNotFoundException",  # e2b: deleted or expired
@@ -51,7 +54,32 @@ def _is_environment_transport_loss(error: Exception) -> bool:
             "connecting to control server" in message
             and "connection refused" in message
         )
+        or _names_a_stopped_container(message)
     )
+
+
+def _names_a_stopped_container(text: str) -> bool:
+    # Modal: 'executing processes for container: cannot execute in container
+    # "ta-..." in state stopped'.
+    text = text.lower()
+    return "cannot execute in container" in text and "in state stopped" in text
+
+
+def exec_result_shows_environment_gone(result: Any) -> bool:
+    """An exec that "completed" only because the container had already
+    stopped: Modal reports that as a nonzero result, not an exception. A
+    process killed inside a live sandbox exits 137 too, so the exit code alone
+    never counts."""
+    return bool(result.return_code) and _names_a_stopped_container(
+        str(result.stderr or "")
+    )
+
+
+def raise_if_exec_result_gone(result: Any) -> None:
+    """Raise EnvironmentGoneError for a result from a stopped container."""
+    if exec_result_shows_environment_gone(result):
+        detail = truncate_middle(str(result.stderr or "").strip(), 300)
+        raise EnvironmentGoneError(f"exit code {result.return_code}: {detail}")
 
 
 def raise_if_environment_gone(error: Exception) -> None:
@@ -66,6 +94,10 @@ def raise_if_environment_gone(error: Exception) -> None:
     if gone:
         raise EnvironmentGoneError(f"{name}: {error}") from error
 
+
+# Sandbox commands in a row that fail without running (the exec call itself
+# raises, unclassified) before the sandbox is treated as gone.
+MAX_CONSECUTIVE_EXEC_FAILURES = 5
 
 # Fixed executor limits. Command timeouts are additionally capped at the
 # remaining time budget minus BUDGET_MARGIN_SEC, so the loop regains control
@@ -280,6 +312,7 @@ class ToolExecutor:
         # time budget — the loop must regain control before the hard kill.
         self._remaining_sec = remaining_sec
         self._default_workdir = default_workdir
+        self._exec_failures = 0  # in a row; see MAX_CONSECUTIVE_EXEC_FAILURES
 
     async def bash(self, args: BashArgs) -> ToolResult:
         if args.timeout_sec > MAX_TIMEOUT_SEC:
@@ -304,6 +337,7 @@ class ToolExecutor:
         except UnicodeDecodeError as e:
             # Binary bytes on stdout/stderr break the transport's text
             # decoding; the whole output is lost.
+            self._exec_failures = 0
             return ToolResult(
                 f"Command output could not be decoded as text ({e}). Its "
                 "output was discarded. Binary data must not reach "
@@ -315,11 +349,26 @@ class ToolExecutor:
             # Modal's SandboxTimeoutError subclasses builtin TimeoutError but
             # means the sandbox died, not the command — classify first.
             raise_if_environment_gone(e)
+            self._exec_failures = 0
             return ToolResult(
                 f"Command timed out after {timeout}s (timeout_sec={timeout}) "
                 f"and was killed. {self._timeout_guidance(timeout)}",
                 is_error=True,
             )
+        except EnvironmentGoneError:
+            raise
+        except Exception as e:
+            raise_if_environment_gone(e)
+            self._exec_failures += 1
+            if self._exec_failures >= MAX_CONSECUTIVE_EXEC_FAILURES:
+                # Unrecognized, but the sandbox has stopped running commands.
+                raise EnvironmentGoneError(
+                    f"{self._exec_failures} commands in a row could not run in "
+                    f"the sandbox; the last: {type(e).__name__}: {e}"
+                ) from e
+            raise
+        self._exec_failures = 0
+        raise_if_exec_result_gone(result)
         body = format_exec_output(result.stdout, result.stderr)
         elapsed = time.monotonic() - started
         if self._looks_like_timeout(result.return_code, elapsed, timeout):

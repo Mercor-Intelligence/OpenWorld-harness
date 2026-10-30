@@ -204,10 +204,25 @@ class Proximus(BaseAgent):
                     ):
                         await self._auto_final_submission()
                     if not self._run.env_lost and self.config.restore_on_exit:
-                        await self._submissions.restore_winner()
+                        await self._restore_winner()
             finally:
                 self._populate_context(context)
                 self._dump_artifacts()
+        if self._run.env_lost:
+            # Reached only when the loop itself ended normally: the sandbox died
+            # during the end-of-run submission or restore, so the workspace the
+            # verifier would grade is gone too. Fail the trial, as a death
+            # during the loop does, rather than grade whatever remains.
+            raise tools.EnvironmentGoneError(
+                "the sandbox was lost while finalizing the run"
+            )
+
+    async def _restore_winner(self) -> None:
+        try:
+            await self._submissions.restore_winner()
+        except tools.EnvironmentGoneError as e:
+            self.logger.warning(f"Winner restore failed: the sandbox is gone ({e}).")
+            self._run.env_lost = True
 
     async def _agent_loop(self) -> None:
         for turn in itertools.count(1):

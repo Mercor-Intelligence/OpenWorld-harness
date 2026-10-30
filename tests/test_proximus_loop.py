@@ -2444,3 +2444,112 @@ async def test_confirmed_submit_never_auto_pins_a_new_winner(tmp_path, monkeypat
     assert context.metadata is not None
     assert context.metadata["ended_by_submit"] is True
     assert context.metadata["submitted_commit"] == fake_hash(1)
+
+
+# ----- a sandbox lost at the end of the run (H2) -----
+
+STOPPED = (
+    "executing processes for container: cannot execute in container "
+    '"ta-01M64JTB2H96QMJ9XX335DNVQV" in state stopped'
+)
+
+
+class StoppedEnv(FakeEnv):
+    """The container stops once ``dies_on`` appears in a command: from then
+    on every exec answers 137 with Modal's stopped-container stderr."""
+
+    def __init__(self, dies_on: str, **kwargs):
+        super().__init__(**kwargs)
+        self.dies_on = dies_on
+        self.stopped = False
+
+    async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
+        self.stopped = self.stopped or self.dies_on in command
+        if self.stopped:
+            self.all_commands.append(command)
+            return ExecResult(stdout=None, stderr=STOPPED, return_code=137)
+        return await super().exec(
+            command, cwd=cwd, env=env, timeout_sec=timeout_sec, user=user
+        )
+
+
+async def test_a_stopped_container_ends_the_run_on_the_first_result(
+    tmp_path, monkeypatch
+):
+    fake = FakeCompletion([bash_response("echo alive")])
+    monkeypatch.setattr(litellm, "acompletion", fake)
+
+    agent = make_agent(tmp_path)
+    context = AgentContext()
+    with pytest.raises(EnvironmentGoneError, match="in state stopped"):
+        await agent.run("Do a task", StoppedEnv("echo alive"), context)  # type: ignore[arg-type]
+    assert len(fake.calls) == 1
+    assert context.metadata is not None and context.metadata["env_lost"] is True
+
+
+async def test_death_during_the_exit_submission_fails_the_run(tmp_path, monkeypatch):
+    # The loop ends at its turn limit; the auto-submission finds the container
+    # stopped, so there is nothing left to restore or grade.
+    fake = FakeCompletion([bash_response("echo hi")])
+    monkeypatch.setattr(litellm, "acompletion", fake)
+
+    agent = make_agent(tmp_path, max_turns=1)
+    env = StoppedEnv("rev-parse -q --verify")
+    context = AgentContext()
+    with pytest.raises(EnvironmentGoneError, match="finalizing"):
+        await agent.run("Do a task", env, context)  # type: ignore[arg-type]
+    assert context.metadata is not None
+    assert context.metadata["env_lost"] is True
+    assert context.metadata["submissions"] == []
+    assert not any("end-state" in c for c in env.all_commands)
+
+
+async def test_death_during_the_restore_fails_a_confirmed_run(tmp_path, monkeypatch):
+    fake = FakeCompletion(finish_responses())
+    monkeypatch.setattr(litellm, "acompletion", fake)
+
+    agent = make_agent(tmp_path)
+    context = AgentContext()
+    with pytest.raises(EnvironmentGoneError, match="finalizing"):
+        await agent.run("Do a task", StoppedEnv("refs/proximus/end-state"), context)  # type: ignore[arg-type]
+    assert context.metadata is not None
+    assert context.metadata["ended_by_submit"] is True
+    assert context.metadata["env_lost"] is True
+    assert context.metadata["n_submissions"] == 1
+
+
+async def test_a_provider_error_is_not_masked_by_a_dying_finalize(
+    tmp_path, monkeypatch
+):
+    error = litellm.exceptions.AuthenticationError(
+        message="invalid key", llm_provider="openai", model="gpt-test"
+    )
+    fake = FakeCompletion([bash_response("echo hi"), error])
+    monkeypatch.setattr(litellm, "acompletion", fake)
+
+    agent = make_agent(tmp_path)
+    context = AgentContext()
+    with pytest.raises(litellm.exceptions.AuthenticationError):
+        await agent.run("Do a task", StoppedEnv("rev-parse -q --verify"), context)  # type: ignore[arg-type]
+    assert context.metadata is not None and context.metadata["env_lost"] is True
+
+
+async def test_an_ordinary_restore_failure_does_not_fail_the_run(tmp_path, monkeypatch):
+    fake = FakeCompletion(finish_responses())
+    monkeypatch.setattr(litellm, "acompletion", fake)
+
+    class BadRestoreEnv(FakeEnv):
+        async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
+            if "refs/proximus/end-state" in command:
+                self.all_commands.append(command)
+                return ExecResult(stdout=None, stderr="error: pathspec", return_code=1)
+            return await super().exec(
+                command, cwd=cwd, env=env, timeout_sec=timeout_sec, user=user
+            )
+
+    agent = make_agent(tmp_path)
+    context = AgentContext()
+    await agent.run("Do a task", BadRestoreEnv(), context)  # type: ignore[arg-type]
+    assert context.metadata is not None
+    assert context.metadata["env_lost"] is False
+    assert context.metadata["ended_by_submit"] is True

@@ -11,6 +11,7 @@ from openworld_harness.tools import (
     DEFAULT_TIMEOUT_SEC,
     EXEC_ENV,
     LIST_SUBMISSIONS_DESCRIPTION,
+    MAX_CONSECUTIVE_EXEC_FAILURES,
     MAX_TIMEOUT_SEC,
     SUBMIT_DESCRIPTION,
     VIEW_IMAGE_DESCRIPTION,
@@ -23,6 +24,7 @@ from openworld_harness.tools import (
     ToolResult,
     ViewImageArgs,
     args_for_trajectory,
+    exec_result_shows_environment_gone,
     raise_if_environment_gone,
     truncate_middle,
 )
@@ -585,6 +587,7 @@ class TestRaiseIfEnvironmentGone:
         [
             ("SandboxTerminatedError", "modal.exception"),
             ("SandboxTimeoutError", "modal.exception"),
+            ("SandboxLikelyOutOfMemoryError", "harbor.environments.modal"),
             ("NotFoundError", "modal.exception"),
             ("DaytonaNotFoundError", "daytona.common.errors"),
             ("SandboxNotFoundException", "e2b.exceptions"),
@@ -634,6 +637,13 @@ class TestRaiseIfEnvironmentGone:
                 Exception,
                 "Modal Sandbox is shutting down.",
             ),
+            (
+                "ExecutionError",
+                "modal.exception",
+                Exception,
+                "executing processes for container: cannot execute in container "
+                '"ta-01M64JTB2H96QMJ9XX335DNVQV" in state stopped',
+            ),
         ],
     )
     def test_environment_transport_loss_reraises(
@@ -661,3 +671,96 @@ class TestRaiseIfEnvironmentGone:
     )
     def test_ordinary_errors_pass_through(self, name: str, module: str):
         raise_if_environment_gone(_provider_error(name, module))
+
+
+# Verbatim from a gpt-6.1-sol sweep trial whose sandbox had been killed.
+STOPPED = (
+    "executing processes for container: cannot execute in container "
+    '"ta-01M64JTB2H96QMJ9XX335DNVQV" in state stopped'
+)
+
+
+class TestDeadSandboxResults:
+    """A stopped container answers exec with a nonzero result, not an
+    exception; the exit code alone never says the sandbox is gone."""
+
+    def test_classification(self):
+        assert exec_result_shows_environment_gone(
+            ExecResult(stdout=None, stderr=STOPPED, return_code=137)
+        )
+        # An OOM-killed process inside a live sandbox.
+        assert not exec_result_shows_environment_gone(
+            ExecResult(stdout=None, stderr="Killed", return_code=137)
+        )
+        # A command that merely prints the words (grep over a log).
+        assert not exec_result_shows_environment_gone(
+            ExecResult(stdout=None, stderr=STOPPED, return_code=0)
+        )
+
+    async def test_bash_raises_on_a_stopped_container(self):
+        env = FakeEnv([ExecResult(stdout=None, stderr=STOPPED, return_code=137)])
+        with pytest.raises(EnvironmentGoneError, match="in state stopped"):
+            await bash_tool(env).call('{"command": "echo alive"}')
+
+    async def test_a_killed_process_is_an_ordinary_result(self):
+        env = FakeEnv([ExecResult(stdout=None, stderr="Killed", return_code=137)])
+        result = await bash_tool(env).call('{"command": "python train.py"}')
+        assert result.is_error and result.content.startswith("exit code: 137")
+
+
+class FlakyEnv(FakeEnv):
+    """exec raises an unclassified error for each True in ``plan``, then
+    behaves; False entries succeed."""
+
+    def __init__(self, plan: list[bool]):
+        super().__init__()
+        self.plan = list(plan)
+
+    async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
+        if self.plan and self.plan.pop(0):
+            raise RuntimeError("grpc: deadline exceeded")
+        return await super().exec(command, cwd, env, timeout_sec, user)
+
+
+class TestConsecutiveExecFailures:
+    async def call(self, executor: ToolExecutor) -> ToolResult:
+        tool = Tool("bash", BASH_DESCRIPTION, BashArgs, executor.bash)
+        return await tool.call('{"command": "true"}')
+
+    async def test_failures_below_the_cap_stay_tool_errors(self):
+        n = MAX_CONSECUTIVE_EXEC_FAILURES - 1
+        executor = make_executor(FlakyEnv([True] * n + [False, True]))
+        for _ in range(n):
+            result = await self.call(executor)
+            assert result.is_error and "grpc: deadline exceeded" in result.content
+        assert (await self.call(executor)).content.startswith("exit code: 0")
+        # The success reset the count: one more failure is just a failure.
+        assert (await self.call(executor)).is_error
+
+    async def test_the_cap_ends_the_run(self):
+        n = MAX_CONSECUTIVE_EXEC_FAILURES
+        executor = make_executor(FlakyEnv([True] * n))
+        for _ in range(n - 1):
+            await self.call(executor)
+        with pytest.raises(EnvironmentGoneError, match=f"{n} commands in a row"):
+            await self.call(executor)
+
+    async def test_timeouts_and_undecodable_output_are_not_counted(self):
+        class MixedEnv(FakeEnv):
+            def __init__(self):
+                super().__init__()
+                self.n = 0
+
+            async def exec(self, *args, **kwargs):
+                self.n += 1
+                if self.n % 2:
+                    raise RuntimeError("grpc: deadline exceeded")
+                if self.n % 4:
+                    raise TimeoutError()
+                raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid")
+
+        executor = make_executor(MixedEnv())
+        # Unclassified failures alternate with calls that did reach the
+        # sandbox, so the count never builds up.
+        for _ in range(4 * MAX_CONSECUTIVE_EXEC_FAILURES):
+            assert (await self.call(executor)).is_error
