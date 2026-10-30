@@ -87,8 +87,8 @@ class ProximusConfig(AgentOptions):
     """Fraction of the context limit at which the conversation is summarized."""
 
     disallowed_tools: list[str] = Field(default_factory=list)
-    """Tools to remove: ``list_submissions`` or ``view_image``. ``bash`` and
-    ``submit`` are always available."""
+    """Tools to remove: ``list_submissions``, ``view_image``, ``web_search`` or
+    ``web_fetch``. ``bash`` and ``submit`` are always available."""
 
     prompt_template_path: str | None = None
     """Jinja2 template around the task instruction. It must contain

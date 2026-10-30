@@ -201,6 +201,9 @@ class WebTools(Proximus):
     config: OpenWorldConfig
     # Keys a runner keeps for a web run but never passes to the sandbox.
     web_host_key_envs = (EXA_KEY_ENV,)
+    # Absent without web_snapshot_as_of: paired web and no-web arms can share
+    # the same disallowed_tools.
+    optional_tools = Proximus.optional_tools | {"web_search", "web_fetch"}
 
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)

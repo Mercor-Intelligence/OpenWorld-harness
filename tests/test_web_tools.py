@@ -1151,6 +1151,20 @@ async def test_web_is_off_without_a_cutoff(
     assert not (tmp_path / "agent" / web_agent.WEB_LOG).exists()
 
 
+def test_a_no_web_run_accepts_disallowed_web_tools(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-dummy-0123456789abcdef")
+    agent = OpenWorldHarness(
+        logs_dir=tmp_path / "agent", model_name=MODEL, disallowed_tools=["web_fetch"]
+    )
+    assert "web_fetch" not in agent._tools
+    with pytest.raises(ValueError, match="unknown tools"):
+        OpenWorldHarness(
+            logs_dir=tmp_path / "b", model_name=MODEL, disallowed_tools=["web_typo"]
+        )
+
+
 def test_the_exa_key_is_hidden_from_sandbox_commands_with_or_without_web(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

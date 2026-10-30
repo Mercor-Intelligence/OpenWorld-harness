@@ -531,12 +531,15 @@ class Proximus(BaseAgent):
         """The task sandbox of the current run."""
         return self._environment
 
+    # Tools a run may lack, so disallowing one is never an error: view_image is
+    # dropped for non-vision models.
+    optional_tools: frozenset[str] = frozenset({"view_image"})
+
     def _filter_tools(self, by_name: dict[str, tools.Tool]) -> dict[str, tools.Tool]:
         removed = set(self.config.disallowed_tools)
         if removed & {"bash", "submit"}:
             raise ValueError("disallowed_tools cannot remove bash or submit")
-        # view_image is dropped for non-vision models, so naming it is fine.
-        unknown = removed - set(by_name) - {"view_image"}
+        unknown = removed - set(by_name) - self.optional_tools
         if unknown:
             raise ValueError(f"disallowed_tools names unknown tools: {sorted(unknown)}")
         return {name: tool for name, tool in by_name.items() if name not in removed}
