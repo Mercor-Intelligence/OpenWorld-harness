@@ -1,5 +1,6 @@
 """Setup steps for git-less images and large workspace inputs (sandbox_git)."""
 
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -87,7 +88,7 @@ def test_gitignore_literal_escapes_wildmatch() -> None:
 
 async def test_large_inputs() -> None:
     env = FakeEnvironment(
-        has_git=True, large="base-model/model.safetensors\ndata/a b.arrow\n"
+        has_git=True, large="./base-model/model.safetensors\n./data/a b.arrow\n"
     )
     assert await large_inputs(env, "/app", 100) == [
         "/base-model/model.safetensors",
@@ -95,9 +96,47 @@ async def test_large_inputs() -> None:
     ]
     command = env.calls[-1][1][0]
     assert command.startswith("test -e /app/.git && exit 3;")
-    assert "-size +100M" in command
+    assert "-size +102400k" in command
     repo = FakeEnvironment(has_git=True, repo=True)
     assert await large_inputs(repo, "/app", 100) is None
+
+
+class ShellEnvironment:
+    """Runs the command for real with POSIX sh, as a sandbox would."""
+
+    async def exec(self, command: str, timeout_sec: int | None = None, user=None):
+        done = subprocess.run(
+            ["sh", "-c", command], capture_output=True, text=True, timeout=timeout_sec
+        )
+        return ExecResult(
+            stdout=done.stdout, stderr=done.stderr, return_code=done.returncode
+        )
+
+
+async def test_large_inputs_runs_in_a_real_shell(tmp_path: Path) -> None:
+    (tmp_path / "data").mkdir()
+    for name, size in [("big.bin", 2 << 20), ("data/a b.arrow", 3 << 20)]:
+        with open(tmp_path / name, "wb") as f:
+            f.truncate(size)  # sparse: the size is what find tests
+    (tmp_path / "small.txt").write_text("x")
+    found = await large_inputs(ShellEnvironment(), str(tmp_path), 1)
+    assert sorted(found or []) == ["/big.bin", "/data/a b.arrow"]
+    (tmp_path / ".git").mkdir()
+    assert await large_inputs(ShellEnvironment(), str(tmp_path), 1) is None
+
+
+async def test_a_failing_listing_keeps_what_it_found(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class Partial(FakeEnvironment):
+        async def exec(self, command: str, timeout_sec=None, user=None):
+            return ExecResult(
+                stdout="./w.bin\n", stderr="find: ./gone: No such file", return_code=1
+            )
+
+    found = await large_inputs(Partial(has_git=True), "/app", 100)
+    assert found == ["/w.bin"]
+    assert "No such file" in caplog.text
 
 
 def make_agent(tmp_path: Path, **kwargs) -> OpenWorldHarness:
@@ -128,11 +167,11 @@ async def test_setup_installs_git_and_excludes_large_inputs(
         large_input_exclude_mb=50,
         workspace_git_excludes=["/cache/"],
     )
-    env = FakeEnvironment(has_git=False, large="base-model/w.bin\n")
+    env = FakeEnvironment(has_git=False, large="./base-model/w.bin\n")
     await agent.setup(env)  # type: ignore[arg-type]
     assert agent._platform_git == "installed"
     assert agent._platform_git_excludes == ["/base-model/w.bin"]
-    assert "-size +50M" in env.calls[-1][1][0]
+    assert "-size +51200k" in env.calls[-1][1][0]
     assert agent.config.workspace_git_excludes == ["/cache/", "/base-model/w.bin"]
 
 

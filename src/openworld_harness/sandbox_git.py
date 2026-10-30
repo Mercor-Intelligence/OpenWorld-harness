@@ -15,6 +15,7 @@ Ported from the RWE eval platform's ``PlatformProximus``; both are off by defaul
   ``platform_git_excludes`` metadata counts them.
 """
 
+import logging
 import re
 import shlex
 from pathlib import Path, PurePosixPath
@@ -25,6 +26,8 @@ SANDBOX_GIT = "/usr/local/bin/git"
 # (submissions create .git/info themselves).
 SANDBOX_TEMPLATES = "/usr/local/share/git-core/templates"
 NOT_A_FRESH_WORKSPACE = 3
+
+logger = logging.getLogger(__name__)
 
 
 async def ensure_git(environment: Any, static_git: Path) -> str:
@@ -56,17 +59,30 @@ def gitignore_literal(path: str) -> str:
 
 async def large_inputs(environment: Any, workdir: str, min_mb: int) -> list[str] | None:
     """Patterns for the files over ``min_mb`` MB in ``workdir``, or None when it is
-    already a git repository (a task's own repository is kept as it is)."""
+    already a git repository (a task's own repository is kept as it is).
+
+    Mounted filesystems are searched too, since ``git add -A`` stages them. POSIX
+    ``find`` only (busybox has no ``-printf``). Best effort: a failing listing
+    keeps what it found and logs the rest, because the excludes only save time."""
     wd = shlex.quote(workdir)
     result = await environment.exec(
         f"test -e {wd}/.git && exit {NOT_A_FRESH_WORKSPACE};"
-        f" find {wd} -xdev -type f -size +{int(min_mb)}M -printf '%P\\n'",
+        f" cd {wd} && find . -type f -size +{int(min_mb) * 1024}k",
         timeout_sec=60,
         user="root",
     )
     if result.return_code == NOT_A_FRESH_WORKSPACE:
         return None
+    paths = [
+        line[2:]
+        for line in (result.stdout or "").splitlines()
+        if line.startswith("./") and len(line) > 2
+    ]
     if result.return_code != 0:
-        detail = f"listing large workspace files failed: {result.stderr or ''}"
-        raise RuntimeError(detail[:500])
-    return [gitignore_literal(p) for p in (result.stdout or "").splitlines() if p]
+        logger.warning(
+            "listing large workspace files exited %s; excluding the %d found: %s",
+            result.return_code,
+            len(paths),
+            str(result.stderr or "").strip()[:500],
+        )
+    return [gitignore_literal(p) for p in paths]
