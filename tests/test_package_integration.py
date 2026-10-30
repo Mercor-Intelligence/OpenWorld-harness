@@ -231,7 +231,8 @@ async def test_run_blanks_consumed_credentials_in_the_sandbox(tmp_path, monkeypa
 
     agent = _agent(tmp_path, "openai/test-model", {"OPENAI_API_KEY": "sk-secret"})
     await agent.run("Task", ScopedEnv(), AgentContext())  # type: ignore[arg-type]
-    assert scopes == [{"OPENAI_API_KEY": ""}]
+    # The Exa key is blanked as well, whether or not the web tools are on.
+    assert scopes == [{"EXA_API_KEY": "", "OPENAI_API_KEY": ""}]
 
 
 def test_model_info_keeps_known_bare_names(tmp_path):

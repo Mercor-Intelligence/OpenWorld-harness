@@ -231,10 +231,10 @@ class WebTools(Proximus):
 
     @override
     def _sandbox_hidden_env_keys(self) -> set[str]:
-        # Also when a runner passes the Exa key in Harbor's agent env, which
-        # Harbor overlays on every sandbox exec.
-        keys = super()._sandbox_hidden_env_keys()
-        return keys | set(self.web_host_key_envs) if self.web_enabled else keys
+        # In case a runner passes the Exa key in Harbor's agent env, which
+        # Harbor overlays on every sandbox exec. Without the web tools too: a
+        # no-web control arm must not reach the live web through the key.
+        return super()._sandbox_hidden_env_keys() | set(self.web_host_key_envs)
 
     @override
     def build_tools(self) -> dict[str, tools.Tool]:
