@@ -602,6 +602,41 @@ async def test_budgets_errors_and_missing_key(
         await agent.run("x", SimpleNamespace(), AgentContext())  # type: ignore[arg-type]
 
 
+async def test_the_exa_key_is_read_from_the_agent_env_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-dummy-0123456789abcdef")
+    monkeypatch.delenv("EXA_API_KEY", raising=False)
+    keys: list[str] = []
+
+    class Client:
+        def __init__(self, key: str, as_of: str) -> None:
+            keys.append(key)
+
+        async def aclose(self) -> None:
+            pass
+
+    async def core_run(self: Any, instruction: str, environment: Any, context: Any):
+        pass
+
+    monkeypatch.setattr(exa, "SnapshotClient", Client)
+    monkeypatch.setattr(Proximus, "run", core_run)
+    env = SimpleNamespace(
+        network_policy=SimpleNamespace(network_mode=NetworkMode.NO_NETWORK)
+    )
+    for host_key in (None, "host-key"):
+        if host_key:
+            monkeypatch.setenv("EXA_API_KEY", host_key)
+        agent = OpenWorldHarness(
+            logs_dir=tmp_path / "agent",
+            model_name=MODEL,
+            web_snapshot_as_of="2026-06-01",
+            extra_env={"EXA_API_KEY": "agent-env-key"},
+        )
+        await agent.run("x", env, AgentContext())  # type: ignore[arg-type]
+    assert keys == ["agent-env-key", "agent-env-key"]
+
+
 async def test_rejections_are_answers_and_are_remembered(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

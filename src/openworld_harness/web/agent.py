@@ -285,11 +285,13 @@ class WebTools(Proximus):
         if not self.web_enabled:
             await super().run(instruction, environment, context)
             return
-        key = os.environ.get(EXA_KEY_ENV)
+        # Harbor's agent env first, then the host, like the model keys.
+        key = self.extra_env.get(EXA_KEY_ENV) or os.environ.get(EXA_KEY_ENV)
         if not key:
             # Running on without search would record a no-web trial as a web one.
             raise RuntimeError(
-                f"{EXA_KEY_ENV} is not set in the runner; a web run needs it"
+                f"{EXA_KEY_ENV} is not set in the agent env or the runner; a web "
+                "run needs it"
             )
         assert self.config.web_snapshot_as_of is not None
         self._web = self._new_web_run()

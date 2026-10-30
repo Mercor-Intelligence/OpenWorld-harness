@@ -233,12 +233,12 @@ URL without the fragment. Exa requests stop where the harness's end-of-budget ma
 and after that the tools refuse new requests, so a slow Exa cannot eat the time kept for the
 final submit.
 
-`EXA_API_KEY` must be in the environment of the process that runs the agent. A run with
-`web_snapshot_as_of` and no key fails at the start instead of running without the web tools.
-The tools read the key there and never put it in Harbor's agent env, so it never reaches the
-sandbox; if a runner passes it in the agent env anyway, sandbox commands see it blanked, like
-the model keys, with or without the web tools. `OpenWorldHarness.web_host_key_envs` names it, so a runner can pass it to the
-host process only when the web tools are on.
+`EXA_API_KEY` is read like the model keys: from Harbor's agent env (`--ae`) first, then
+the environment of the process that runs the agent. A run with `web_snapshot_as_of` and no
+key fails at the start instead of running without the web tools. The tools run in that
+process, so the key never reaches the sandbox: sandbox commands see it blanked, like the
+model keys, with or without the web tools. `OpenWorldHarness.web_host_key_envs` names it, so
+a runner can pass it to the host process only when the web tools are on.
 
 Known limits:
 

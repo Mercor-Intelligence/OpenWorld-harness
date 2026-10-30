@@ -145,9 +145,9 @@ class OpenWorldConfig(ProximusConfig):
     """Turns on ``web_search`` and ``web_fetch`` over Exa Snapshot, pinned to
     this cutoff: an ISO 8601 date or date-time (UTC); pages are seen as Exa
     stored them at or before it. Never shown to the model. Exa documents a
-    rolling window of about five months. Needs ``EXA_API_KEY`` in the runner's
-    environment; the tools run there, so the key never enters the sandbox. The
-    other ``web_*`` options need it set."""
+    rolling window of about five months. Needs ``EXA_API_KEY`` in Harbor's agent
+    env or the runner's environment; the tools run in the runner, so the key
+    never enters the sandbox. The other ``web_*`` options need it set."""
 
     web_max_searches: int = Field(default=50, ge=1)
     """Exa search requests allowed per run. An identical repeated query is served
