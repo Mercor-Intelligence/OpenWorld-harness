@@ -276,7 +276,8 @@ async def test_failed_submit_does_not_arm_the_confirmation(tmp_path, monkeypatch
     assert "Nothing was recorded by this call and the run continues" in tools[0]
     assert "time budget remains" in tools[0]
     assert "confirm this as your final submission" not in tools[0]
-    assert "Submission #1 recorded" in tools[1]
+    # Numbered like list_submissions' rows: the failed call was #1.
+    assert "Submission #2 recorded" in tools[1]
     assert "confirm this as your final submission" in tools[1]
     assert "Final submission confirmed" not in tools[1]
     assert "Final submission confirmed" in tools[2]
@@ -306,7 +307,7 @@ async def test_failed_confirm_cancels_the_pending_confirmation(tmp_path, monkeyp
     assert "previous submission (#1) remains your recorded result" in tools[1]
     assert "Nothing was recorded by this call" in tools[1]
     assert "Final submission confirmed" not in tools[1]
-    assert "Submission #2 recorded" in tools[2]
+    assert "Submission #3 recorded" in tools[2]
     assert "confirm this as your final submission" in tools[2]
     assert "Final submission confirmed" in tools[3]
     assert context.metadata is not None

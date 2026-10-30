@@ -606,8 +606,8 @@ class Proximus(BaseAgent):
             if winner is not None and await self._submissions.matches_winner(
                 args.commit, winner
             ):
-                count = self._submissions.success_count()
-                self.logger.info(f"Confirm reuses submission #{count}; run ends.")
+                index = self._submissions.winner_index()
+                self.logger.info(f"Confirm reuses submission #{index}; run ends.")
                 return tools.ToolResult(prompts.SUBMIT_CONFIRMED, ends_run=True)
         try:
             submission = await self._submissions.submit(args.commit)
@@ -617,15 +617,14 @@ class Proximus(BaseAgent):
             return tools.ToolResult(
                 prompts.submission_retry(
                     str(e),
-                    self._submissions.success_count(),
+                    self._submissions.winner_index() or 0,
                     self._elapsed(),
                     self.config.time_budget_sec,
                 )
             )
+        # Numbered like list_submissions' rows, failed calls included.
         note = prompts.submission_note(
-            self._submissions.success_count(),
-            submission.hash,
-            submission.description,
+            submission.index, submission.hash, submission.description
         )
         if confirmed:
             return tools.ToolResult(f"{note} {prompts.SUBMIT_CONFIRMED}", ends_run=True)

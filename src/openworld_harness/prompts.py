@@ -231,23 +231,24 @@ def submission_note(n: int, commit: str, subject: str) -> str:
     return f"Submission #{n} recorded from commit {commit[:12]}{subject_clause}."
 
 
-def submission_failed(detail: str, prior_submissions: int = 0) -> str:
-    """With an earlier recorded submission the winner is that commit, not
-    the final workspace state — the fallback sentence must stay truthful."""
-    if prior_submissions:
+def submission_failed(detail: str, winner: int = 0) -> str:
+    """With an earlier recorded submission (``winner``, its list_submissions
+    number) the result is that commit, not the final workspace state — the
+    fallback sentence must stay truthful."""
+    if winner:
         return (
             f"Submission could not be recorded ({detail}). Your previous "
-            f"submission (#{prior_submissions}) remains your recorded result."
+            f"submission (#{winner}) remains your recorded result."
         )
     return f"Submission could not be recorded ({detail}). {SUBMIT_FALLBACK}"
 
 
 def submission_retry(
-    detail: str, prior_submissions: int, elapsed: float, budget: float | None
+    detail: str, winner: int, elapsed: float, budget: float | None
 ) -> str:
     """A submit that failed to record: what failed, what stays recorded, that
     the run continues, and the time left."""
-    parts = [submission_failed(detail, prior_submissions), SUBMIT_RETRY]
+    parts = [submission_failed(detail, winner), SUBMIT_RETRY]
     left = time_left(elapsed, budget)
     if left:
         parts.append(left)

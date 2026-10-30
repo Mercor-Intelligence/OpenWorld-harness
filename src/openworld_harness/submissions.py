@@ -31,6 +31,8 @@ class Submission:
     # True when the harness itself made the commit (a commitless submit on
     # a dirty tree); mirrored to the record row as ``harness_commit``.
     harness_committed: bool = False
+    # The row's number, as list_submissions shows it (failed calls count).
+    index: int = 0
 
 
 class SubmissionError(Exception):
@@ -133,11 +135,15 @@ class Submissions:
             self._append(failure)
             raise
         submission = Submission(
-            hash_, description, self._since(started), harness_committed
+            hash_,
+            description,
+            self._since(started),
+            harness_committed,
+            index=len(self._submissions) + 1,
         )
         entry: dict[str, Any] = {
             "event": "submission",
-            "index": len(self._submissions) + 1,
+            "index": submission.index,
             "ok": True,
             "hash": submission.hash,
             "record_sec": submission.duration_sec,
