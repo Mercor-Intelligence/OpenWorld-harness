@@ -428,3 +428,26 @@ async def test_restore_raises_for_a_dead_sandbox_and_logs_other_failures(
     await subs.submit("HEAD")
     with pytest.raises(EnvironmentGoneError):
         await subs.restore_winner()
+
+
+@pytest.mark.parametrize(
+    ("plan", "winner"),
+    [
+        # (record result, auto) per submit call, oldest first.
+        ([(record_ok(1), False), (record_ok(2), True)], f"{2:040x}"),
+        ([(record_ok(1), True)], f"{2:040x}"),
+        ([(RECORD_BAD_REF, False), (record_ok(2), True)], f"{3:040x}"),
+        ([(record_ok(1), False), (record_ok(2), False)], f"{3:040x}"),
+        ([(record_ok(1), True), (record_ok(2), False)], f"{3:040x}"),
+    ],
+)
+async def test_the_model_s_own_submission_wins_over_the_exit_snapshot(
+    tmp_path: Path, plan, winner
+):
+    subs = make_submissions(tmp_path, FakeEnv([result for result, _ in plan]))
+    for _, auto in plan:
+        try:
+            await subs.submit("HEAD", auto=auto)
+        except SubmissionError:
+            pass
+    assert subs.winner_hash() == winner

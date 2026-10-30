@@ -565,6 +565,66 @@ async def test_run_end_without_submit_auto_pins_final_state(tmp_path, monkeypatc
     assert rows[-1]["auto"] is True and rows[-1]["ok"] is True
 
 
+async def test_timeout_after_a_submit_is_graded_on_the_submit(tmp_path, monkeypatch):
+    """submit, more work, then the turn limit: the exit snapshot of the
+    changed tree is recorded, but the model's own submission is what the
+    restore checks out and what grading uses (H7)."""
+    fake = FakeCompletion([git_submit_response(), bash_response("echo edit")])
+    monkeypatch.setattr(litellm, "acompletion", fake)
+
+    class EditedEnv(GitEnv):
+        # The tree changed after the submit: a bare probe does not match, and
+        # the exit snapshot pins a new commit.
+        async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
+            if 'echo "matched"' in command:
+                self.all_commands.append(command)
+                self.all_envs.append(dict(env or {}))
+                return ExecResult(stdout=None, stderr=None, return_code=1)
+            if "rev-parse -q --verify" in command and any(
+                "rev-parse -q --verify" in c and 'echo "matched"' not in c
+                for c in self.all_commands
+            ):
+                self.all_commands.append(command)
+                self.all_envs.append(dict(env or {}))
+                return ExecResult(
+                    stdout=f"subject=snapshot\nhash={FIX2_HASH}",
+                    stderr=None,
+                    return_code=0,
+                )
+            return await super().exec(
+                command, cwd=cwd, env=env, timeout_sec=timeout_sec, user=user
+            )
+
+    agent = make_agent(tmp_path, max_turns=2)
+    env = EditedEnv()
+    context = AgentContext()
+    await agent.run("Task", env, context)  # type: ignore[arg-type]
+
+    assert context.metadata is not None
+    rows = context.metadata["submissions"]
+    assert [(r["ok"], bool(r.get("auto")), r["hash"]) for r in rows] == [
+        (True, False, HEAD_HASH),
+        (True, True, FIX2_HASH),
+    ]
+    assert context.metadata["submitted_commit"] == HEAD_HASH
+    restore = [e for c, e in zip(env.all_commands, env.all_envs) if "end-state" in c]
+    assert [e["winner"] for e in restore] == [HEAD_HASH]
+
+
+def test_listing_marks_the_model_s_own_submission():
+    from openworld_harness.prompts import submissions_list
+
+    rows = [
+        {"index": 1, "ok": True, "hash": HEAD_HASH, "elapsed_sec": 60},
+        {"index": 2, "ok": True, "hash": FIX2_HASH, "elapsed_sec": 90, "auto": True},
+    ]
+    listing = submissions_list(rows).splitlines()
+    assert listing[0].endswith("<- current result")
+    assert "current result" not in listing[1]
+    only_auto = submissions_list([rows[1]]).splitlines()
+    assert only_auto[0].endswith("<- current result")
+
+
 async def test_clean_double_submit_end_gets_no_auto_submission(tmp_path, monkeypatch):
     """When the run ends via the confirm protocol and the tree still matches
     the winner, the exit path must NOT grow a duplicate submission."""

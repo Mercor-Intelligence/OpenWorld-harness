@@ -27,8 +27,9 @@ class ProximusConfig(AgentOptions):
 
     auto_submit_on_exit: bool = True
     """When the run ends, save any unsubmitted work as a final submission, so a
-    run that times out is still graded on its last state. Skipped if nothing
-    changed since the last submission."""
+    run that times out without submitting is still graded on its last state.
+    It is recorded but not graded when the model submitted anything itself.
+    Skipped if nothing changed since the last submission."""
 
     restore_on_exit: bool = True
     """When the run ends, check out the winning submission so the verifier sees

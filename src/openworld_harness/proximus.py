@@ -558,10 +558,10 @@ class Proximus(BaseAgent):
         argless ``submit()`` path — so a run that ends without submitting
         (budget timeout, stall) still leaves its last state on the
         submissions rail: recorded in ``submissions.jsonl`` (flagged
-        ``auto``), graded like any other
-        submission. Skipped when the live tree already matches the newest
-        submission — a clean double-submit ending must not grow a duplicate.
-        Best-effort: nothing here may block the restore."""
+        ``auto``), and graded only when the model recorded no submission of
+        its own (``Submissions.winner_hash``). Skipped when the live tree
+        already matches the winner — a clean double-submit ending must not
+        grow a duplicate. Best-effort: nothing here may block the restore."""
         try:
             winner = self._submissions.winner_hash()
             if winner is not None and await self._submissions.matches_winner(

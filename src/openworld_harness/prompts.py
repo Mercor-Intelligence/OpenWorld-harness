@@ -262,8 +262,10 @@ def submissions_list(rows: list[dict[str, Any]]) -> str:
             "No submissions recorded yet. If you never submit, the workspace "
             "state at the end of the run is your result."
         )
-    ok_indices = [r["index"] for r in rows if r.get("ok")]
-    winner = ok_indices[-1] if ok_indices else None
+    # The rule of Submissions.winner_hash: the model's own submissions first.
+    ok_rows = [r for r in rows if r.get("ok")]
+    chosen = [r for r in ok_rows if not r.get("auto")] or ok_rows
+    winner = chosen[-1]["index"] if chosen else None
     lines = []
     for row in rows:
         line = f"#{row['index']}  {(row.get('hash') or '')[:12] or '????'}"
