@@ -25,8 +25,9 @@ this harness keeps; the model-facing prompts still call the agent Proximus.
   Only a recorded submission arms it now, and a failed one says that nothing was
   recorded and the run continues.
 - A dead sandbox ends the run with `EnvironmentGoneError`: Harbor's
-  `SandboxLikelyOutOfMemoryError`, exec results from a stopped container, and 5
-  exec failures in a row count, besides upstream's transport errors. A death during
+  `SandboxLikelyOutOfMemoryError`, an exec result that is only Modal's
+  stopped-container message, and 5 exec failures in a row that a trivial probe
+  command confirms count, besides upstream's transport errors. A death during
   the exit submit or restore raises once the artifacts are saved, so Harbor records
   an error and runs no verifier instead of grading a stale tree.
 - The model's own submission wins. The exit snapshot is still recorded, but it is

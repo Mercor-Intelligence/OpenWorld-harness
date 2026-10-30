@@ -696,6 +696,16 @@ class TestDeadSandboxResults:
         assert not exec_result_shows_environment_gone(
             ExecResult(stdout=None, stderr=STOPPED, return_code=0)
         )
+        # ...and fails, or prints them among other output.
+        assert not exec_result_shows_environment_gone(
+            ExecResult(stdout=None, stderr=f"log.txt:3: {STOPPED}\n", return_code=1)
+        )
+        assert not exec_result_shows_environment_gone(
+            ExecResult(stdout="FAILED test_x", stderr=STOPPED, return_code=1)
+        )
+        assert not exec_result_shows_environment_gone(
+            ExecResult(stdout=None, stderr=f"{STOPPED}\nTraceback", return_code=1)
+        )
 
     async def test_bash_raises_on_a_stopped_container(self):
         env = FakeEnv([ExecResult(stdout=None, stderr=STOPPED, return_code=137)])
@@ -737,13 +747,25 @@ class TestConsecutiveExecFailures:
         # The success reset the count: one more failure is just a failure.
         assert (await self.call(executor)).is_error
 
-    async def test_the_cap_ends_the_run(self):
+    async def test_the_cap_ends_the_run_when_the_probe_fails_too(self):
         n = MAX_CONSECUTIVE_EXEC_FAILURES
-        executor = make_executor(FlakyEnv([True] * n))
+        executor = make_executor(FlakyEnv([True] * (n + 1)))  # + the probe
         for _ in range(n - 1):
             await self.call(executor)
         with pytest.raises(EnvironmentGoneError, match=f"{n} commands in a row"):
             await self.call(executor)
+
+    async def test_a_live_sandbox_survives_the_cap(self):
+        """Commands the exec keeps refusing (an oversized heredoc, say) are
+        the model's errors while a trivial probe still runs."""
+        n = MAX_CONSECUTIVE_EXEC_FAILURES
+        env = FlakyEnv([True] * n + [False] + [True] * (n - 1))
+        executor = make_executor(env)
+        for _ in range(2 * n - 1):
+            result = await self.call(executor)
+            assert result.is_error and "grpc: deadline exceeded" in result.content
+        # Only the probe reached the sandbox, once, with no working directory.
+        assert [(c["command"], c["cwd"]) for c in env.exec_calls] == [("true", None)]
 
     async def test_timeouts_and_undecodable_output_are_not_counted(self):
         class MixedEnv(FakeEnv):

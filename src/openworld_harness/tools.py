@@ -1,4 +1,5 @@
 import json
+import re
 import tempfile
 import time
 from collections.abc import Awaitable, Callable
@@ -65,13 +66,26 @@ def _names_a_stopped_container(text: str) -> bool:
     return "cannot execute in container" in text and "in state stopped" in text
 
 
+# The whole stderr of an exec Modal refused because the container had stopped.
+_STOPPED_CONTAINER_STDERR = re.compile(
+    r"(?:executing processes for container: )?"
+    r'cannot execute in container "[^"\n]*" in state stopped',
+    re.IGNORECASE,
+)
+
+
 def exec_result_shows_environment_gone(result: Any) -> bool:
     """An exec that "completed" only because the container had already
     stopped: Modal reports that as a nonzero result, not an exception. A
     process killed inside a live sandbox exits 137 too, so the exit code alone
-    never counts."""
-    return bool(result.return_code) and _names_a_stopped_container(
-        str(result.stderr or "")
+    never counts. The command's own output lands in the same fields, so the
+    result must be nothing but Modal's message: no stdout, and a stderr that
+    is that one line."""
+    return (
+        bool(result.return_code)
+        and not str(result.stdout or "").strip()
+        and _STOPPED_CONTAINER_STDERR.fullmatch(str(result.stderr or "").strip())
+        is not None
     )
 
 
@@ -96,8 +110,10 @@ def raise_if_environment_gone(error: Exception) -> None:
 
 
 # Sandbox commands in a row that fail without running (the exec call itself
-# raises, unclassified) before the sandbox is treated as gone.
+# raises, unclassified) before a trivial probe command decides whether the
+# sandbox is gone or only those commands were refused.
 MAX_CONSECUTIVE_EXEC_FAILURES = 5
+LIVENESS_PROBE_TIMEOUT_SEC = 60
 
 # Fixed executor limits. Command timeouts are additionally capped at the
 # remaining time budget minus BUDGET_MARGIN_SEC, so the loop regains control
@@ -361,11 +377,14 @@ class ToolExecutor:
             raise_if_environment_gone(e)
             self._exec_failures += 1
             if self._exec_failures >= MAX_CONSECUTIVE_EXEC_FAILURES:
-                # Unrecognized, but the sandbox has stopped running commands.
-                raise EnvironmentGoneError(
-                    f"{self._exec_failures} commands in a row could not run in "
-                    f"the sandbox; the last: {type(e).__name__}: {e}"
-                ) from e
+                if not await self._sandbox_answers():
+                    # Unrecognized, but the sandbox has stopped running commands.
+                    raise EnvironmentGoneError(
+                        f"{self._exec_failures} commands in a row could not run "
+                        f"in the sandbox; the last: {type(e).__name__}: {e}"
+                    ) from e
+                # The sandbox is fine; the exec refused these commands.
+                self._exec_failures = 0
             raise
         self._exec_failures = 0
         raise_if_exec_result_gone(result)
@@ -382,6 +401,17 @@ class ToolExecutor:
             f"exit code: {result.return_code}\n{body}",
             is_error=result.return_code != 0,
         )
+
+    async def _sandbox_answers(self) -> bool:
+        """Whether a trivial command still runs in the sandbox."""
+        try:
+            result = await self._environment.exec(
+                "true", timeout_sec=LIVENESS_PROBE_TIMEOUT_SEC
+            )
+        except Exception as e:
+            raise_if_environment_gone(e)
+            return False
+        return not exec_result_shows_environment_gone(result)
 
     async def view_image(self, args: ViewImageArgs) -> ToolResult:
         path = args.path
