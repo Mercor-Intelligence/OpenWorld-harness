@@ -155,7 +155,7 @@ async def test_failed_record_recorded_with_error(tmp_path: Path):
     (row,) = subs.summary()
     assert row["ok"] is False
     assert "not a commit" in row["error"]
-    assert subs.success_count() == 0
+    assert subs.valid_hash_count() == 0
 
 
 async def test_summary_indexes_all_submissions_in_order(tmp_path: Path):
@@ -181,7 +181,7 @@ async def test_winner_hash_is_newest_successful_recording(tmp_path: Path):
     with pytest.raises(SubmissionError):
         await subs.submit("badref")
     assert subs.winner_hash() == f"{2:040x}"
-    assert subs.success_count() == 2
+    assert subs.valid_hash_count() == 2
 
 
 async def test_unwritable_record_path_never_raises(tmp_path: Path):
@@ -267,7 +267,7 @@ async def test_a_failed_recording_keeps_its_number(tmp_path: Path):
     submission = await subs.submit("HEAD")
     assert [call["env"]["idx"] for call in env.exec_calls] == ["1", "2"]
     assert submission.index == 2
-    assert subs.success_count() == 1
+    assert subs.valid_hash_count() == 1
 
 
 async def test_submit_unknown_ref_reports_model_readable_guidance(tmp_path: Path):
@@ -402,7 +402,7 @@ async def test_valid_hash_count_ignores_empty_and_abbreviated_hashes(tmp_path: P
     await subs.submit("HEAD")
     await subs.submit("HEAD")
 
-    assert subs.success_count() == 3
+    assert [row["ok"] for row in subs.summary()] == [True, True, True]
     assert subs.valid_hash_count() == 1
     assert subs.winner_hash() == RECORD_HASH
 

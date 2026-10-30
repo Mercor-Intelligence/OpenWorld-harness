@@ -250,9 +250,6 @@ class Submissions:
         except Exception as e:
             self._logger.warning(f"Could not write submissions.jsonl: {e}")
 
-    def success_count(self) -> int:
-        return sum(1 for e in self._submissions if e["ok"])
-
     def valid_hash_count(self) -> int:
         """Successful rows that carry a complete Git object id."""
         return len(self._restorable())
