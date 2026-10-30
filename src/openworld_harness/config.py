@@ -123,3 +123,17 @@ class ProximusConfig(AgentOptions):
                 "LiteLLM maps both onto the provider's thinking setting"
             )
         return self
+
+
+class OpenWorldConfig(ProximusConfig):
+    """Options of OpenWorldHarness: the Proximus core's, plus the fork's."""
+
+    static_git_path: str | None = None
+    """Host path of a statically linked ``git``. When the sandbox has no git,
+    setup copies it to /usr/local/bin/git, so submissions work in images that
+    ship none. Unset, such an image fails at setup."""
+
+    large_input_exclude_mb: int | None = Field(default=None, ge=1)
+    """Files already in a fresh workspace (not a git repository) that are larger
+    than this many MB are added to ``workspace_git_excludes`` at setup, so the
+    baseline commit never hashes multi-GB inputs. The files stay in place."""

@@ -30,7 +30,7 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-from openworld_harness.config import ProximusConfig
+from openworld_harness.config import OpenWorldConfig
 from openworld_harness.submissions import (
     DEFAULT_SUBMISSION_TIMEOUT_SEC,
     RESTORE_TIMEOUT_SEC,
@@ -89,7 +89,7 @@ def task_agent_kwargs(
     """Agent kwargs for running ``model_name`` on the task in ``task_dir``.
 
     Only explicitly set options are returned; everything else keeps the
-    ProximusConfig default. Raises ValueError on an unknown or invalid option.
+    OpenWorldConfig default. Raises ValueError on an unknown or invalid option.
     """
     data = tomllib.loads((Path(task_dir) / "task.toml").read_text())
     agent = data.get("agent") or {}
@@ -123,7 +123,7 @@ def task_agent_kwargs(
         if excludes:
             kwargs["workspace_git_excludes"] = excludes
     try:
-        ProximusConfig.model_validate(kwargs)
+        OpenWorldConfig.model_validate(kwargs)
     except Exception as e:
         raise ValueError(f"invalid [agent.{name}] in {task_dir}: {e}") from e
     return kwargs

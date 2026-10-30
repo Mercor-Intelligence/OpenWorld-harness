@@ -16,7 +16,7 @@ from harbor.cli.utils import parse_kwargs
 from harbor.models.trial.config import AgentConfig
 
 from openworld_harness import OpenWorldHarness, task_agent_kwargs
-from openworld_harness.config import ProximusConfig
+from openworld_harness.config import OpenWorldConfig
 
 MODEL = "openai/gpt-test"
 # Optional: the tasks/ directory of a FrontierSWE v2 checkout.
@@ -69,7 +69,7 @@ def make_agent(kwargs: dict[str, Any], logs_dir: Path):
     )
 
 
-# One valid, non-default value per ProximusConfig field. A new field without an
+# One valid, non-default value per OpenWorldConfig field. A new field without an
 # entry here fails test_values_cover_every_field.
 FIELD_VALUES: dict[str, Any] = {
     "time_budget_sec": 1234.5,
@@ -81,6 +81,8 @@ FIELD_VALUES: dict[str, Any] = {
     "reasoning_effort": "high",
     "api_key_env": "PROXIMUS_TIER0_KEY",
     "workspace_git_excludes": ["node_modules", "target"],
+    "static_git_path": "/opt/rwe-eval/git",
+    "large_input_exclude_mb": 100,
     "litellm_model_info": {
         MODEL: {"max_input_tokens": 50000, "supports_vision": True},
         "gpt-test": {"max_input_tokens": 50000, "input_cost_per_token": 1e-06},
@@ -99,9 +101,9 @@ FIELD_VALUES: dict[str, Any] = {
 
 
 def test_values_cover_every_field():
-    assert set(FIELD_VALUES) == set(ProximusConfig.model_fields)
+    assert set(FIELD_VALUES) == set(OpenWorldConfig.model_fields)
     for field, value in FIELD_VALUES.items():
-        info = ProximusConfig.model_fields[field]
+        info = OpenWorldConfig.model_fields[field]
         default = info.get_default(call_default_factory=True)
         assert value != default, f"{field}: test value equals the default"
 
@@ -272,7 +274,7 @@ def test_ak_values_validate_with_right_types(tmp_path):
             "api_base=None",
         ]
     )
-    config = ProximusConfig.model_validate(parsed)
+    config = OpenWorldConfig.model_validate(parsed)
     assert config.max_turns == 3 and type(config.max_turns) is int
     assert config.enable_summarize is False
     assert config.llm_call_kwargs == {"timeout": 5}
@@ -307,7 +309,7 @@ def test_frontier_swe_workspace_git_excludes_are_git_wildmatch(task_dir):
     for pattern in kwargs.get("workspace_git_excludes", []):
         assert pattern and not pattern.startswith("./"), pattern
         assert not pattern.endswith("/**"), pattern
-    ProximusConfig.model_validate(kwargs)
+    OpenWorldConfig.model_validate(kwargs)
 
     override = task_agent_kwargs(
         task_dir, MODEL, overrides={"workspace_git_excludes": ["only-this"]}
