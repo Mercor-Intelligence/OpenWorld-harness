@@ -899,14 +899,17 @@ class LLM:
             completion_kwargs["extra_body"] = extra_body
         elif (
             tools is not None
+            and not self._config.reasoning_effort
+            and "reasoning_effort" not in self._config.llm_call_kwargs
             and self.is_openai_reasoning_series()
             and _litellm_strips_summary_alias()
         ):
             # Without an effort litellm still sends gpt-5.4+ with tools to
             # /v1/responses, so ask for summaries here too. litellm maps this
             # alias to reasoning.summary on that path and strips it on the
-            # chat path; it reads it for routing only together with an
-            # effort, so the route does not change.
+            # chat path. It reads it for routing only together with an effort
+            # (then older gpt-5 models move to /v1/responses), hence only
+            # without one: the route does not change.
             completion_kwargs["extra_body"] = {"reasoning_summary": "auto"}
         # Deliberately no tool_choice, ever: Anthropic's hierarchical cache
         # invalidation would flush the messages cache if it changed between

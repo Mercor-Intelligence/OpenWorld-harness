@@ -1849,6 +1849,28 @@ async def test_an_older_litellm_is_not_asked_for_summaries(tmp_path, monkeypatch
     assert "extra_body" not in fake.calls[0]
 
 
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"reasoning_effort": "high"},
+        {"llm_call_kwargs": {"reasoning_effort": "high"}},
+    ],
+)
+async def test_an_unbridged_effort_gets_no_summary(tmp_path, monkeypatch, options):
+    """With an effort, a summary alias makes litellm move an older gpt-5
+    model to /v1/responses, without the params replay needs there."""
+    fake = FakeCompletion(finish_responses())
+    monkeypatch.setattr(litellm, "acompletion", fake)
+
+    agent = OpenWorldHarness(
+        logs_dir=tmp_path / "logs", model_name="openai/gpt-5.1", **options
+    )
+    assert not agent._llm.uses_responses_bridge([{"type": "function"}])
+    await agent.run("Task", FakeEnv(), AgentContext())  # type: ignore[arg-type]
+
+    assert "extra_body" not in fake.calls[0]
+
+
 async def test_requests_without_tools_ask_for_no_summary(tmp_path, monkeypatch):
     fake = FakeCompletion([text_response("done")])
     monkeypatch.setattr(litellm, "acompletion", fake)
