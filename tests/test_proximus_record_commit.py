@@ -295,6 +295,25 @@ async def test_staging_that_outlasts_its_limit_is_cleaned_up(
     assert [row["ok"] for row in subs.summary()] == [False]
 
 
+async def test_a_staging_git_killed_early_is_not_called_a_timeout(workspace, tmp_path):
+    repo, home, subs = workspace
+    real_git = shutil.which("git")
+    # An OOM kill: git add dies of SIGKILL at once, long before the limit.
+    shim(
+        tmp_path / "bin",
+        "git",
+        f'if [ "$1" = add ]; then kill -9 $$; fi\nexec {real_git} "$@"',
+    )
+    (repo / "main.py").write_text("print('v2')\n")
+    with pytest.raises(SubmissionError) as excinfo:
+        await shimmed(subs, home, tmp_path / "bin").submit("")
+    message = str(excinfo.value)
+    assert "was killed after" in message and "exit 137" in message
+    assert "did not finish" not in message
+    # Nothing is untracked, so there is no list of large files.
+    assert "Largest untracked files" not in message
+
+
 async def test_an_exit_snapshot_cut_short_after_its_commit_moves_nothing(
     workspace, tmp_path
 ):

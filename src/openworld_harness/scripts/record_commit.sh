@@ -60,9 +60,12 @@ else
     if [ -n "$stage_timeout" ] && timeout -k 5 5 true >/dev/null 2>&1; then
         marker=$(mktemp 2>/dev/null) || marker=""
         staged=0
+        started=$(date +%s)
         timeout -k 10 "$stage_timeout" git add -A 2>/dev/null || staged=$?
+        took=$(( $(date +%s) - started ))
         # Timed out: GNU timeout exits 124, or 137 after -k; busybox's execs
-        # git, which then dies of the TERM itself (143).
+        # git, which then dies of the TERM itself (143). Killed early with
+        # 137/143, git ran out of memory or was stopped, not out of time.
         if [ "$staged" -eq 124 ] || [ "$staged" -eq 137 ] \
             || [ "$staged" -eq 143 ]; then
             rm -f "$index.lock"
@@ -75,13 +78,20 @@ else
                     -newer "$marker" -exec rm -f {} + 2>/dev/null
                 rm -f "$marker"
             fi
-            echo "Staging (git add -A) did not finish within ${stage_timeout}s;" \
+            if [ "$staged" -eq 124 ] || [ "$took" -ge "$stage_timeout" ]; then
+                why="did not finish within ${stage_timeout}s"
+            else
+                why="was killed after ${took}s (exit $staged; often out of memory)"
+            fi
+            echo "Staging (git add -A) $why;" \
                 "nothing was recorded and partial staging was cleaned up. If" \
                 "large generated files are not part of your result, add them" \
                 "to .gitignore and submit again, or commit only what matters" \
                 "and submit that commit hash." >&2
+            # xargs runs du once even on no input, and du alone sizes ".".
             largest=$(timeout 20 sh -c 'git ls-files -o --exclude-standard -z \
-                | xargs -0 du -k 2>/dev/null | sort -rn | head -5' 2>/dev/null)
+                | xargs -0 sh -c "[ \$# -gt 0 ] && du -k \"\$@\"" sh 2>/dev/null \
+                | sort -rn | head -5' 2>/dev/null)
             if [ -n "$largest" ]; then
                 printf 'Largest untracked files (KB):\n%s\n' "$largest" >&2
             fi
