@@ -230,6 +230,20 @@ async def test_submit_honors_configured_ten_minute_timeout(tmp_path: Path):
     assert env.exec_calls[0]["timeout_sec"] == 600
 
 
+@pytest.mark.parametrize(
+    ("submission_timeout", "stage_timeout"), [(600, "540"), (90, "30"), (89, "")]
+)
+async def test_staging_is_bounded_only_when_the_bound_fits(
+    tmp_path: Path, submission_timeout, stage_timeout
+):
+    """The bound plus its cleanup must finish inside the exec's own limit, or
+    the exec kills git first and leaves its index.lock behind."""
+    env = FakeEnv([RECORD_OK])
+    subs = make_submissions(tmp_path, env, submission_timeout_sec=submission_timeout)
+    await subs.submit("HEAD")
+    assert env.exec_calls[0]["env"]["stage_timeout"] == stage_timeout
+
+
 async def test_submit_passes_the_model_ref_out_of_band(tmp_path: Path):
     # The model-controlled ref travels as an exec env var, never spliced
     # into the script text — there is nothing to shell-quote.

@@ -204,7 +204,8 @@ async def test_staging_that_outlasts_its_limit_is_cleaned_up(
 
     repo, home, subs = workspace
     monkeypatch.setattr(submissions_module, "MIN_STAGE_TIMEOUT_SEC", 1)
-    subs._submission_timeout_sec = 30  # staging gets the 1 s minimum
+    monkeypatch.setattr(submissions_module, "STAGE_RESERVE_SEC", 29)
+    subs._submission_timeout_sec = 30  # staging gets 1 s
     real_git = shutil.which("git")
     # A `git add` that hangs after taking the lock and writing a temp pack.
     shim(

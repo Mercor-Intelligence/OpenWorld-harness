@@ -185,7 +185,7 @@ class Submissions:
                     "wd": self._workdir,
                     "commit": ref,
                     "idx": str(int(index)),
-                    "stage_timeout": str(self._stage_timeout_sec()),
+                    "stage_timeout": self._stage_timeout_sec(),
                 },
                 self._submission_timeout_sec,
             )
@@ -206,10 +206,12 @@ class Submissions:
             raise SubmissionError(tools.truncate_middle(detail, 500))
         return self._parse_record_output(str(result.stdout or ""))
 
-    def _stage_timeout_sec(self) -> int:
-        return max(
-            MIN_STAGE_TIMEOUT_SEC, self._submission_timeout_sec - STAGE_RESERVE_SEC
-        )
+    def _stage_timeout_sec(self) -> str:
+        """Seconds staging may take, or "" (unbounded) when the submission's
+        time cannot fit the bound plus its cleanup: the exec's own timeout
+        would then kill git first and skip the cleanup."""
+        stage = int(self._submission_timeout_sec - STAGE_RESERVE_SEC)
+        return str(stage) if stage >= MIN_STAGE_TIMEOUT_SEC else ""
 
     @staticmethod
     def _parse_record_output(stdout: str) -> tuple[str, str, bool]:
