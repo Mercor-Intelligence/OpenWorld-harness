@@ -68,8 +68,9 @@ async def large_inputs(environment: Any, workdir: str, min_mb: int) -> list[str]
 
     Mounted filesystems are searched too, since ``git add -A`` stages them. POSIX
     ``find`` only (busybox has no ``-printf``). Best effort: a failing listing
-    keeps what it found and logs the rest, and one that times out excludes
-    nothing, because the excludes only save time."""
+    keeps what it found and logs the rest, and one that times out or cannot
+    run excludes nothing, because the excludes only save time. A dead sandbox
+    still raises."""
     wd = shlex.quote(workdir)
     try:
         result = await environment.exec(
@@ -81,9 +82,12 @@ async def large_inputs(environment: Any, workdir: str, min_mb: int) -> list[str]
             timeout_sec=60,
             user="root",
         )
-    except TimeoutError as e:
+    except Exception as e:
         tools.raise_if_environment_gone(e)
-        logger.warning("listing large workspace files timed out; none excluded")
+        logger.warning(
+            "listing large workspace files %s; none excluded",
+            "timed out" if isinstance(e, TimeoutError) else f"failed: {e!r}",
+        )
         return []
     if result.return_code == NOT_A_FRESH_WORKSPACE:
         return None

@@ -175,6 +175,26 @@ async def test_a_listing_that_times_out_excludes_nothing(
     assert "timed out" in caplog.text
 
 
+async def test_a_listing_that_cannot_run_excludes_nothing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from openworld_harness.tools import EnvironmentGoneError
+
+    class Flaky(FakeEnvironment):
+        async def exec(self, command: str, timeout_sec=None, user=None):
+            raise RuntimeError("grpc: deadline exceeded")
+
+    assert await large_inputs(Flaky(has_git=True), "/app", 100) == []
+    assert "grpc: deadline exceeded" in caplog.text
+
+    class Gone(FakeEnvironment):
+        async def exec(self, command: str, timeout_sec=None, user=None):
+            raise RuntimeError("Modal sandbox is shutting down")
+
+    with pytest.raises(EnvironmentGoneError):
+        await large_inputs(Gone(has_git=True), "/app", 100)
+
+
 async def test_a_failing_listing_keeps_what_it_found(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
