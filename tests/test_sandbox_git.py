@@ -95,7 +95,6 @@ async def test_large_inputs() -> None:
         "/data/a b.arrow",
     ]
     command = env.calls[-1][1][0]
-    assert command.startswith("test -e /app/.git && exit 3;")
     assert "-size +102400k" in command
     repo = FakeEnvironment(has_git=True, repo=True)
     assert await large_inputs(repo, "/app", 100) is None
@@ -123,6 +122,19 @@ async def test_large_inputs_runs_in_a_real_shell(tmp_path: Path) -> None:
     assert sorted(found or []) == ["/big.bin", "/data/a b.arrow"]
     (tmp_path / ".git").mkdir()
     assert await large_inputs(ShellEnvironment(), str(tmp_path), 1) is None
+    # A workdir inside an enclosing repository is not fresh either.
+    assert await large_inputs(ShellEnvironment(), str(tmp_path / "data"), 1) is None
+
+
+async def test_a_listing_that_times_out_excludes_nothing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class Slow(FakeEnvironment):
+        async def exec(self, command: str, timeout_sec=None, user=None):
+            raise TimeoutError()
+
+    assert await large_inputs(Slow(has_git=True), "/app", 100) == []
+    assert "timed out" in caplog.text
 
 
 async def test_a_failing_listing_keeps_what_it_found(

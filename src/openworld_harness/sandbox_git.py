@@ -21,6 +21,8 @@ import shlex
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from openworld_harness import tools
+
 SANDBOX_GIT = "/usr/local/bin/git"
 # Without a templates directory every `git init` warns; an empty one is enough
 # (submissions create .git/info themselves).
@@ -59,18 +61,26 @@ def gitignore_literal(path: str) -> str:
 
 async def large_inputs(environment: Any, workdir: str, min_mb: int) -> list[str] | None:
     """Patterns for the files over ``min_mb`` MB in ``workdir``, or None when it is
-    already a git repository (a task's own repository is kept as it is).
+    already in a git repository, its own or an enclosing one (a task's own
+    repository is kept as it is, and setup writes no excludes into it).
 
     Mounted filesystems are searched too, since ``git add -A`` stages them. POSIX
     ``find`` only (busybox has no ``-printf``). Best effort: a failing listing
-    keeps what it found and logs the rest, because the excludes only save time."""
+    keeps what it found and logs the rest, and one that times out excludes
+    nothing, because the excludes only save time."""
     wd = shlex.quote(workdir)
-    result = await environment.exec(
-        f"test -e {wd}/.git && exit {NOT_A_FRESH_WORKSPACE};"
-        f" cd {wd} && find . -type f -size +{int(min_mb) * 1024}k",
-        timeout_sec=60,
-        user="root",
-    )
+    try:
+        result = await environment.exec(
+            f'd={wd}; while :; do test -e "$d/.git" && exit {NOT_A_FRESH_WORKSPACE};'
+            ' [ "$d" = / ] && break; d=$(dirname "$d"); done;'
+            f" cd {wd} && find . -type f -size +{int(min_mb) * 1024}k",
+            timeout_sec=60,
+            user="root",
+        )
+    except TimeoutError as e:
+        tools.raise_if_environment_gone(e)
+        logger.warning("listing large workspace files timed out; none excluded")
+        return []
     if result.return_code == NOT_A_FRESH_WORKSPACE:
         return None
     paths = [
