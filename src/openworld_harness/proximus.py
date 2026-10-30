@@ -861,9 +861,19 @@ class Proximus(BaseAgent):
     ) -> None:
         """Send the model a harness message and record it as a user step, so
         the trajectory shows everything the model was told. ``replace_last``
-        overwrites the previous message instead of appending one."""
+        overwrites the previous message instead of appending one, and its
+        step too when that recorded the same kind of message."""
         if replace_last:
             self._run.messages[-1]["content"] = content
+            last = self._steps[-1] if self._steps else None
+            if last is not None and (last.extra or {}).get("harness_message") == kind:
+                self._steps[-1] = last.model_copy(
+                    update={
+                        "message": content,
+                        "timestamp": datetime.now(UTC).isoformat(),
+                    }
+                )
+                return
         else:
             self._run.messages.append({"role": "user", "content": content})
         self._add_step("user", content, extra={"harness_message": kind})

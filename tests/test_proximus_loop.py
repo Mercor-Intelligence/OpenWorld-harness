@@ -2293,6 +2293,66 @@ async def test_request_too_large_evicts_newest_image_and_retries(tmp_path, monke
     assert recorded == [notes[0]]
 
 
+async def test_a_replaced_request_failure_note_replaces_its_step(tmp_path, monkeypatch):
+    """Back-to-back 413s keep one note in the conversation; the trajectory
+    must show that one note too, not one step per retry."""
+    from openworld_harness.prompts import REQUEST_TOO_LARGE_MESSAGE
+
+    def view(call_id: str, path: str) -> FakeResponse:
+        return FakeResponse(
+            FakeMessage(
+                content="look",
+                tool_calls=[
+                    FakeToolCall(call_id, "view_image", json.dumps({"path": path}))
+                ],
+            )
+        )
+
+    first, second = (
+        RuntimeError(
+            '{"code":"RequestEntityTooLarge","message":"Request body size '
+            f'exceeds maximum allowed size: {cap} bytes"}}'
+        )
+        for cap in (10485760, 10485761)
+    )
+    fake = FakeCompletion(
+        [
+            view("c1", "/app/a.png"),
+            view("c2", "/app/b.png"),
+            first,
+            second,
+            bash_response("echo recovered"),
+            *finish_responses(),
+        ]
+    )
+    monkeypatch.setattr(litellm, "acompletion", fake)
+    monkeypatch.setattr(litellm, "supports_vision", lambda model: True)
+    png = make_tiny_png()
+
+    class ImageEnv(FakeEnv):
+        async def download_file(self, source_path, target_path):
+            from pathlib import Path
+
+            Path(target_path).write_bytes(png)
+
+    agent = make_agent(tmp_path)
+    await agent.run("Task", ImageEnv(), AgentContext())  # type: ignore[arg-type]
+
+    note = REQUEST_TOO_LARGE_MESSAGE.format(error=second)
+    in_context = [
+        m["content"]
+        for m in read_messages(agent)
+        if m.get("role") == "user"
+        and str(m.get("content", "")).startswith("Request failed: ")
+    ]
+    recorded = [
+        s["message"]
+        for s in read_trajectory(agent)["steps"]
+        if (s.get("extra") or {}).get("harness_message") == "request_too_large"
+    ]
+    assert in_context == recorded == [note]
+
+
 async def test_invalid_image_is_removed_and_error_returned_to_model(
     tmp_path, monkeypatch
 ):
