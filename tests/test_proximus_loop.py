@@ -1762,6 +1762,51 @@ async def test_bridged_request_carries_responses_params(tmp_path, monkeypatch):
     assert "prompt_cache_key" not in fake.calls[0]
 
 
+@pytest.mark.parametrize(
+    ("model", "summary"),
+    [
+        ("openai/gpt-5.4", True),
+        ("gpt-5.4", True),
+        ("openai/gpt-6.1-test", True),
+        ("openai/gpt-test", False),
+        ("anthropic/claude-test", False),
+    ],
+)
+async def test_default_effort_requests_ask_for_reasoning_summaries(
+    tmp_path, monkeypatch, model, summary
+):
+    """Without an effort the request is not bridged here, but litellm still
+    sends gpt-5.4+ with tools to the Responses API: the summary must be
+    requested anyway, or the trajectory's reasoning stays empty (H5)."""
+    fake = FakeCompletion(finish_responses())
+    monkeypatch.setattr(litellm, "acompletion", fake)
+
+    agent = OpenWorldHarness(
+        logs_dir=tmp_path / "logs",
+        model_name=model,
+        model_info={"max_input_tokens": 200_000},
+    )
+    await agent.run("Task", FakeEnv(), AgentContext())  # type: ignore[arg-type]
+
+    call = fake.calls[0]
+    assert "reasoning_effort" not in call
+    if summary:
+        # Only the summary: the other Responses params change the request.
+        assert call["extra_body"] == {"reasoning_summary": "auto"}
+    else:
+        assert "extra_body" not in call
+
+
+async def test_requests_without_tools_ask_for_no_summary(tmp_path, monkeypatch):
+    fake = FakeCompletion([text_response("done")])
+    monkeypatch.setattr(litellm, "acompletion", fake)
+
+    agent = make_bridged_agent(tmp_path, reasoning_effort=None)
+    await agent._llm.query([{"role": "user", "content": "hi"}], None)
+
+    assert "extra_body" not in fake.calls[0]
+
+
 async def test_xai_responses_request_keeps_system(tmp_path, monkeypatch):
     """xAI Responses needs the shared Responses extra_body, plus list-content
     system messages so LiteLLM does not drop them as unsupported

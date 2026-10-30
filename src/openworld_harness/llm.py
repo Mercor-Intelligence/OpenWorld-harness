@@ -768,6 +768,13 @@ class LLM:
             return False
         return bool(OpenAIGPT5Config.is_model_gpt_5_4_plus_model(model))
 
+    def is_openai_reasoning_series(self) -> bool:
+        """An OpenAI model of the gpt-5 reasoning series (gpt-6 included)."""
+        model = self.model_name.lower()
+        if "openai" not in model and "/" in model:
+            return False  # some other provider's namespace
+        return bool(OpenAIGPT5Config.is_model_gpt_5_model(model))
+
     async def query(
         self,
         messages: list[Message],
@@ -848,6 +855,13 @@ class LLM:
             if self.session_id:
                 extra_body["prompt_cache_key"] = self.session_id
             completion_kwargs["extra_body"] = extra_body
+        elif tools is not None and self.is_openai_reasoning_series():
+            # Without an effort litellm still sends gpt-5.4+ with tools to
+            # /v1/responses, so ask for summaries here too. litellm maps this
+            # alias to reasoning.summary on that path and strips it on the
+            # chat path; it reads it for routing only together with an
+            # effort, so the route does not change.
+            completion_kwargs["extra_body"] = {"reasoning_summary": "auto"}
         # Deliberately no tool_choice, ever: Anthropic's hierarchical cache
         # invalidation would flush the messages cache if it changed between
         # a normal turn and the compaction summary call.
