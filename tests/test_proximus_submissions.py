@@ -204,7 +204,13 @@ async def test_submit_resolves_and_pins_the_ref(tmp_path: Path):
     call = env.exec_calls[0]
     command = call["command"]
     # Script inputs travel as exec env vars, never spliced into the script.
-    assert call["env"] == {**git_safe_env(), "wd": "/app", "commit": "HEAD", "idx": "1"}
+    assert call["env"] == {
+        **git_safe_env(),
+        "wd": "/app",
+        "commit": "HEAD",
+        "idx": "1",
+        "stage_timeout": str(DEFAULT_SUBMISSION_TIMEOUT_SEC - 60),
+    }
     # The ref is resolved to a full SHA NOW (HEAD moves, short hashes and
     # branch names drift) and pinned under refs/proximus/submissions/ so
     # a later rebase/reset or `git gc` cannot make it unreachable before

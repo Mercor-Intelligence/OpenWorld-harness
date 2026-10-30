@@ -13,6 +13,10 @@ from openworld_harness import tools, utils
 
 GIT_TIMEOUT_SEC = 60
 DEFAULT_SUBMISSION_TIMEOUT_SEC = 600
+# Of a submission's time, what staging the live workspace may not use: the
+# commit, pin and chown still need it.
+STAGE_RESERVE_SEC = 60
+MIN_STAGE_TIMEOUT_SEC = 30
 RESTORE_TIMEOUT_SEC = 300
 _FULL_COMMIT_OID = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
 
@@ -177,7 +181,12 @@ class Submissions:
         try:
             result = await self._git_exec(
                 utils.read_script("record_commit.sh"),
-                {"wd": self._workdir, "commit": ref, "idx": str(int(index))},
+                {
+                    "wd": self._workdir,
+                    "commit": ref,
+                    "idx": str(int(index)),
+                    "stage_timeout": str(self._stage_timeout_sec()),
+                },
                 self._submission_timeout_sec,
             )
         except TimeoutError as e:
@@ -196,6 +205,11 @@ class Submissions:
             detail = tools.format_exec_output(result.stdout, result.stderr)
             raise SubmissionError(tools.truncate_middle(detail, 500))
         return self._parse_record_output(str(result.stdout or ""))
+
+    def _stage_timeout_sec(self) -> int:
+        return max(
+            MIN_STAGE_TIMEOUT_SEC, self._submission_timeout_sec - STAGE_RESERVE_SEC
+        )
 
     @staticmethod
     def _parse_record_output(stdout: str) -> tuple[str, str, bool]:

@@ -1,6 +1,6 @@
 # Pin $commit as submission #$idx (a submission IS a git commit).
-# Inputs arrive as exec ENV VARS — wd, commit, idx — never spliced into this
-# script, so there is nothing to shell-quote. Runs as root: the agent user
+# Inputs arrive as exec ENV VARS — wd, commit, idx, stage_timeout — never
+# spliced into this script, so there is nothing to shell-quote. Runs as root: the agent user
 # often cannot invoke git (task images wrap or hide it), so harness git
 # must not inherit default_user.
 #
@@ -35,7 +35,43 @@ if [ "$snapshot" -eq 0 ]; then
 else
     # Stage everything the exclude list allows, then commit if the tree
     # moved; a clean tree with HEAD reuses that commit (confirm-reuse).
-    git add -A 2>/dev/null || true
+    gitdir=$(git rev-parse --git-dir 2>/dev/null) || gitdir=.git
+    if [ -e "$gitdir/index.lock" ]; then
+        echo "Another git process holds $gitdir/index.lock, so nothing was" \
+            "recorded. If no git command of yours is still running, remove" \
+            "that file and submit again." >&2
+        exit 9
+    fi
+    # Within stage_timeout seconds, where the image's timeout supports -k:
+    # staging a huge workspace must not use up the submission's time, and
+    # TERM first lets git remove its own lock. Old busybox stages unbounded.
+    if [ -n "$stage_timeout" ] && timeout -k 5 5 true >/dev/null 2>&1; then
+        marker=$(mktemp 2>/dev/null) || marker=""
+        staged=0
+        timeout -k 10 "$stage_timeout" git add -A 2>/dev/null || staged=$?
+        if [ "$staged" -eq 124 ] || [ "$staged" -eq 137 ]; then
+            rm -f "$gitdir/index.lock"
+            if [ -n "$marker" ]; then
+                find "$gitdir/objects" -type f -name 'tmp_*' -newer "$marker" \
+                    -exec rm -f {} + 2>/dev/null
+                rm -f "$marker"
+            fi
+            echo "Staging (git add -A) did not finish within ${stage_timeout}s;" \
+                "nothing was recorded and partial staging was cleaned up. If" \
+                "large generated files are not part of your result, add them" \
+                "to .gitignore and submit again, or commit only what matters" \
+                "and submit that commit hash." >&2
+            largest=$(timeout 20 sh -c 'git ls-files -o --exclude-standard -z \
+                | xargs -0 du -k 2>/dev/null | sort -rn | head -5' 2>/dev/null)
+            if [ -n "$largest" ]; then
+                printf 'Largest untracked files (KB):\n%s\n' "$largest" >&2
+            fi
+            exit 8
+        fi
+        [ -n "$marker" ] && rm -f "$marker"
+    else
+        git add -A 2>/dev/null || true
+    fi
     if git rev-parse -q --verify HEAD^{commit} >/dev/null \
         && git diff --cached --quiet \
         && git diff --quiet; then

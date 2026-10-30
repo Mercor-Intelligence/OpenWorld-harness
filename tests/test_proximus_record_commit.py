@@ -178,3 +178,82 @@ async def test_matches_winner_tracks_the_live_tree(workspace):
     assert await subs.matches_winner("", submission.hash) is True
     (repo / "more.py").write_text("print('newer work')\n")
     assert await subs.matches_winner("", submission.hash) is False
+
+
+# ----- bounded staging (H4) -----
+
+
+def shim(bin_dir: Path, name: str, body: str) -> None:
+    bin_dir.mkdir(exist_ok=True)
+    path = bin_dir / name
+    path.write_text(f"#!/bin/sh\n{body}\n")
+    path.chmod(0o755)
+
+
+def shimmed(subs: Submissions, home: Path, bin_dir: Path) -> Submissions:
+    env = _base_env(home)
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+    subs._environment = LocalGitEnv(env)  # type: ignore[assignment]
+    return subs
+
+
+async def test_staging_that_outlasts_its_limit_is_cleaned_up(
+    workspace, tmp_path, monkeypatch
+):
+    import openworld_harness.submissions as submissions_module
+
+    repo, home, subs = workspace
+    monkeypatch.setattr(submissions_module, "MIN_STAGE_TIMEOUT_SEC", 1)
+    subs._submission_timeout_sec = 30  # staging gets the 1 s minimum
+    real_git = shutil.which("git")
+    # A `git add` that hangs after taking the lock and writing a temp pack.
+    shim(
+        tmp_path / "bin",
+        "git",
+        f'if [ "$1" = add ]; then\n'
+        f"  d=$({real_git} rev-parse --git-dir)\n"
+        f'  touch "$d/index.lock" "$d/objects/pack/tmp_pack_ours"\n'
+        f"  exec sleep 30\n"
+        f"fi\n"
+        f'exec {real_git} "$@"',
+    )
+    old_pack = repo / ".git" / "objects" / "pack" / "tmp_pack_older"
+    old_pack.write_text("not ours")
+    os.utime(old_pack, (1_000_000_000, 1_000_000_000))
+    (repo / "big.bin").write_bytes(b"x" * 4096)  # untracked: listed as a hint
+
+    with pytest.raises(SubmissionError) as excinfo:
+        await shimmed(subs, home, tmp_path / "bin").submit("")
+    message = str(excinfo.value)
+    assert "did not finish within 1s" in message
+    assert "add them to .gitignore" in message
+    assert "big.bin" in message
+    assert not (repo / ".git" / "index.lock").exists()
+    assert not (repo / ".git" / "objects" / "pack" / "tmp_pack_ours").exists()
+    assert old_pack.exists()  # an older temp file is not ours to remove
+    refs = git(repo, home, "for-each-ref", "refs/proximus")
+    assert refs == ""
+    assert [row["ok"] for row in subs.summary()] == [False]
+
+
+async def test_a_leftover_index_lock_fails_with_guidance(workspace):
+    repo, home, subs = workspace
+    (repo / ".git" / "index.lock").write_text("")
+    (repo / "main.py").write_text("print('v2')\n")
+    with pytest.raises(SubmissionError, match="index.lock"):
+        await subs.submit("")
+    assert git(repo, home, "for-each-ref", "refs/proximus") == ""
+
+
+async def test_a_timeout_without_kill_option_stages_unbounded(workspace, tmp_path):
+    repo, home, subs = workspace
+    # Old busybox: no -k; staging falls back to a plain `git add -A`.
+    shim(
+        tmp_path / "bin",
+        "timeout",
+        'case " $* " in *" -k "*) exit 125 ;; esac\nshift\nexec "$@"',
+    )
+    (repo / "main.py").write_text("print('v2')\n")
+    submission = await shimmed(subs, home, tmp_path / "bin").submit("")
+    assert submission.harness_committed is True
+    assert "print('v2')" in git(repo, home, "show", f"{submission.hash}:main.py")
