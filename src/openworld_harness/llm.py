@@ -811,10 +811,12 @@ class LLM:
         return bool(OpenAIGPT5Config.is_model_gpt_5_4_plus_model(model))
 
     def is_openai_reasoning_series(self) -> bool:
-        """An OpenAI model of the gpt-5 reasoning series (gpt-6 included)."""
+        """An OpenAI-route model (``openai/`` or bare) of the gpt-5 reasoning
+        series, gpt-6 included; not one served by a proxy provider such as
+        ``openrouter/openai/...``."""
         model = self.model_name.lower()
-        if "openai" not in model and "/" in model:
-            return False  # some other provider's namespace
+        if "/" in model and not model.startswith("openai/"):
+            return False  # some other provider's route
         return bool(OpenAIGPT5Config.is_model_gpt_5_model(model))
 
     async def query(

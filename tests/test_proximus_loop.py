@@ -1807,6 +1807,8 @@ async def test_bridged_request_carries_responses_params(tmp_path, monkeypatch):
         ("openai/gpt-6.1-test", True),
         ("openai/gpt-test", False),
         ("anthropic/claude-test", False),
+        # A proxy route: litellm strips the alias only on the OpenAI route.
+        ("openrouter/openai/gpt-5.4", False),
     ],
 )
 async def test_default_effort_requests_ask_for_reasoning_summaries(
