@@ -139,12 +139,20 @@ class ShellEnvironment:
 
 async def test_large_inputs_runs_in_a_real_shell(tmp_path: Path) -> None:
     (tmp_path / "data").mkdir()
-    for name, size in [("big.bin", 2 << 20), ("data/a b.arrow", 3 << 20)]:
+    for name, size in [
+        ("big.bin", 2 << 20),
+        ("data/a b.arrow", 3 << 20),
+        ("data/x\u2028y.bin", 2 << 20),
+    ]:
         with open(tmp_path / name, "wb") as f:
             f.truncate(size)  # sparse: the size is what find tests
     (tmp_path / "small.txt").write_text("x")
     found = await large_inputs(ShellEnvironment(), str(tmp_path), 1)
-    assert sorted(found or []) == ["/big.bin", "/data/a b.arrow"]
+    assert sorted(found or []) == [
+        "/big.bin",
+        "/data/a b.arrow",
+        "/data/x\u2028y.bin",
+    ]
     (tmp_path / ".git").mkdir()
     assert await large_inputs(ShellEnvironment(), str(tmp_path), 1) is None
     # A workdir inside an enclosing repository is not fresh either.

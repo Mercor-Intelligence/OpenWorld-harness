@@ -283,8 +283,10 @@ class Submissions:
     def winner_hash(self) -> str | None:
         """The commit grading restores: the newest successful submission the
         model made, else the newest end-of-run auto-submission. A run that
-        times out after submitting is graded on what the model submitted, not
-        on a half-finished edit; the auto row stays on the record."""
+        times out after submitting is graded on the tracked files the model
+        submitted, not on its later edits to them; files it created after that
+        submission stay in place (restore_winner.sh), and the auto row stays
+        on the record."""
         winner = self._winner()
         return None if winner is None else winner["hash"]
 

@@ -95,7 +95,8 @@ async def large_inputs(environment: Any, workdir: str, min_mb: int) -> list[str]
     tools.raise_if_exec_result_gone(result)
     paths = [
         line[2:]
-        for line in (result.stdout or "").splitlines()
+        # Not splitlines(): it also splits on \x85 or \u2028 inside a name.
+        for line in (result.stdout or "").split("\n")
         if line.startswith("./") and len(line) > 2
     ]
     if result.return_code != 0:
