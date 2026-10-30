@@ -625,3 +625,65 @@ def test_cancellation_is_never_retried():
     assert _is_retryable(asyncio.CancelledError()) is False
     assert _is_retryable(GeneratorExit()) is False
     assert _is_retryable(KeyboardInterrupt()) is False
+
+
+def test_consecutive_reasoning_items_are_all_kept():
+    """LiteLLM kept only the last of consecutive reasoning items, and gpt-6
+    models put the summary in an earlier one (H5)."""
+    from litellm.completion_extras.litellm_responses_transformation.transformation import (
+        LiteLLMResponsesTransformationHandler,
+    )
+    from openai.types.responses import (
+        ResponseFunctionToolCall,
+        ResponseOutputMessage,
+        ResponseOutputText,
+        ResponseReasoningItem,
+    )
+
+    import openworld_harness.llm as llm_mod
+
+    llm_mod._install_litellm_reasoning_only_patch()
+    convert = LiteLLMResponsesTransformationHandler._convert_response_output_to_choices
+    first = ResponseReasoningItem(
+        id="rs_1",
+        type="reasoning",
+        summary=[{"type": "summary_text", "text": "Counting sums of squares."}],
+        encrypted_content="ENC1",
+    )
+    second = ResponseReasoningItem(
+        id="rs_2", type="reasoning", summary=[], encrypted_content="ENC2"
+    )
+    answer = ResponseOutputMessage(
+        id="msg_1",
+        type="message",
+        role="assistant",
+        status="completed",
+        content=[ResponseOutputText(type="output_text", text="113", annotations=[])],
+    )
+    call = ResponseFunctionToolCall(
+        id="fc_1",
+        call_id="call_1",
+        type="function_call",
+        name="bash",
+        arguments='{"command": "ls"}',
+        status="completed",
+    )
+
+    for output, content, n_calls in [
+        ([first, second, answer], "113", 0),
+        ([first, second, call], None, 1),
+    ]:
+        (choice,) = convert(output)
+        message = choice.message
+        assert [i["id"] for i in message.reasoning_items] == ["rs_1", "rs_2"]
+        assert [i["encrypted_content"] for i in message.reasoning_items] == [
+            "ENC1",
+            "ENC2",
+        ]
+        assert message.reasoning_content == "Counting sums of squares."
+        assert (message.content or None) == content
+        assert len(message.tool_calls or []) == n_calls
+
+    # Items LiteLLM already keeps (one per message) are left as they are.
+    (choice,) = convert([first, answer])
+    assert [i["id"] for i in choice.message.reasoning_items] == ["rs_1"]

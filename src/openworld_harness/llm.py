@@ -347,8 +347,37 @@ def _choices_from_reasoning_only_output(output_items: list[Any]) -> list[Any]:
     return [Choices(message=message, finish_reason="stop", index=0)]
 
 
+def _keep_every_reasoning_item(choices: list[Any], output_items: list[Any]) -> None:
+    """Put back the reasoning items LiteLLM dropped, in output order.
+
+    LiteLLM keeps only the last of consecutive reasoning items before a
+    message or tool call. gpt-6 models emit several and summarize in an
+    earlier one, so the summary never reached the trajectory and the
+    earlier items' encrypted CoT was never replayed.
+    """
+    reasoning = [
+        _reasoning_item_dict(item)
+        for item in output_items
+        if _is_reasoning_output_item(item)
+    ]
+    if len(choices) != 1 or len(reasoning) < 2:
+        return
+    message = choices[0].message
+    if len(getattr(message, "reasoning_items", None) or []) >= len(reasoning):
+        return
+    message.reasoning_items = reasoning
+    summary_text = " ".join(
+        str(part.get("text") or "")
+        for item in reasoning
+        for part in item["summary"]
+        if part.get("text")
+    )
+    message.reasoning_content = summary_text or None
+
+
 def _install_litellm_reasoning_only_patch() -> None:
-    """Accept reasoning-only Responses output so encrypted CoT is not lost."""
+    """Accept reasoning-only Responses output and keep every reasoning item,
+    so neither encrypted CoT nor summaries are lost."""
     try:
         from litellm.completion_extras.litellm_responses_transformation.transformation import (
             LiteLLMResponsesTransformationHandler,
@@ -364,9 +393,10 @@ def _install_litellm_reasoning_only_patch() -> None:
         handle_raw_dict_callback: Callable | None = None,
     ) -> list[Any]:
         choices = orig(output_items, handle_raw_dict_callback=handle_raw_dict_callback)
-        if choices:
-            return choices
         items = list(output_items or [])
+        if choices:
+            _keep_every_reasoning_item(choices, items)
+            return choices
         if items and all(_is_reasoning_output_item(item) for item in items):
             return _choices_from_reasoning_only_output(items)
         if not items:
