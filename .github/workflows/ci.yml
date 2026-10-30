@@ -38,3 +38,25 @@ jobs:
         run: |
           uv build
           uv run --locked python scripts/verify_wheel.py dist/openworld_harness-*.whl
+
+  lock:
+    # Fails when uv.lock is stale, and uploads a regenerated one as the
+    # `uv-lock` artifact (uv cannot reach PyPI from every dev box).
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          python-version: "3.12"
+      - name: Check uv.lock
+        id: check
+        run: uv lock --check
+      - name: Regenerate uv.lock
+        if: failure() && steps.check.outcome == 'failure'
+        run: uv lock
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: failure() && steps.check.outcome == 'failure'
+        with:
+          name: uv-lock
+          path: uv.lock
