@@ -36,6 +36,15 @@ def test_defaults_are_unchanged(tmp_path):
     assert tool_names(agent) == ["bash", "list_submissions", "submit"]
 
 
+def test_summary_request_does_not_pause_the_task():
+    """A request that opened with "Pause the task." led summaries to tell
+    the next turn that the user had paused the work (H6)."""
+    request = prompts.SUMMARY_REQUEST.lower()
+    assert "pause the task" not in request
+    assert "not paused" in request
+    assert "continue the task immediately afterwards" in request
+
+
 async def test_max_turns_ends_the_run_with_the_exit_submit(tmp_path, monkeypatch):
     fake = FakeCompletion([bash_response("one"), bash_response("two")])
     monkeypatch.setattr(litellm, "acompletion", fake)

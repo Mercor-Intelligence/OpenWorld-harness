@@ -8,14 +8,14 @@ from harbor.models.task.config import NetworkMode
 from openworld_harness import utils
 from openworld_harness.timer import DEADLINE_PATH
 
-SUMMARY_REQUEST = """Pause the task. Produce a comprehensive handoff summary of your work so far for another agent who will continue without your conversation history. Cover:
+SUMMARY_REQUEST = """Context checkpoint (routine context management; the task is not paused or finished). Your earlier messages are about to be replaced by the handoff summary you write now, and you will continue the task immediately afterwards with the same tools and the remaining time budget, without this conversation history. Write a comprehensive handoff summary of your work so far. Cover:
 1. Major actions completed and their outcomes.
 2. Key findings: important file paths, commands, configurations, error messages, measurements.
 3. Files created or modified so far, and the role of each.
 4. Current status: what is verified working, what is in progress.
 5. Precise next steps, with rationale.
 6. Pitfalls to avoid.
-Be specific and factual. Do not call any tools."""
+Be specific and factual. Reply with the summary only; do not call any tools in this reply."""
 
 HANDOFF_HEADER = (
     "[Context compacted] Your earlier conversation history was summarized to "
