@@ -9,8 +9,10 @@ authors = [{ name = "Proximal AI, Inc." }, { name = "Mercor" }]
 license-files = ["LICENSE", "NOTICE"]
 dependencies = [
     "harbor==0.23.0",
-    # litellm 1.107.0 was a malicious release.
-    "litellm>=1.97.0,<2,!=1.107.0",
+    # litellm 1.107.0 was a malicious release. The mcp extra: litellm imports
+    # mcp on its Responses path (gpt-5.4+ with tools) even when no MCP tool is
+    # used; without it every such request fails as a connection error.
+    "litellm[mcp]>=1.97.0,<2,!=1.107.0",
     "pydantic>=2.11.7,<3",
     "tenacity>=9.1.2,<10",
     "pillow>=10",
