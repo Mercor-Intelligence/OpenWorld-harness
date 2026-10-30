@@ -343,6 +343,13 @@ async def test_a_leftover_index_lock_fails_with_guidance(workspace):
     with pytest.raises(SubmissionError, match="index.lock"):
         await subs.submit("")
     assert git(repo, home, "for-each-ref", "refs/proximus") == ""
+    # The exit snapshot uses its own index, so the model's lock does not stop
+    # it, and the lock is left alone.
+    baseline = git(repo, home, "rev-parse", "HEAD")
+    snapshot = await subs.submit("", auto=True)
+    assert "print('v2')" in git(repo, home, "show", f"{snapshot.hash}:main.py")
+    assert git(repo, home, "rev-parse", "HEAD") == baseline
+    assert (repo / ".git" / "index.lock").exists()
 
 
 async def test_a_timeout_without_kill_option_stages_unbounded(workspace, tmp_path):

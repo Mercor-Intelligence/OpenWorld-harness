@@ -40,7 +40,9 @@ else
     # Stage everything the exclude list allows, then commit if the tree
     # moved; a clean tree with HEAD reuses that commit (confirm-reuse).
     gitdir=$(git rev-parse --git-dir 2>/dev/null) || gitdir=.git
-    if [ -e "$gitdir/index.lock" ]; then
+    # The exit snapshot stages on its own index: a lock left on the model's
+    # (a git command its bash timeout killed) does not block it.
+    if [ "$keep_head" != 1 ] && [ -e "$gitdir/index.lock" ]; then
         echo "Another git process holds $gitdir/index.lock, so nothing was" \
             "recorded. If no git command of yours is still running, remove" \
             "that file and submit again." >&2
