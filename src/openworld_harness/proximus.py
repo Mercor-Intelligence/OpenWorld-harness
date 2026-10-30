@@ -298,14 +298,11 @@ class Proximus(BaseAgent):
                     "Request exceeded the provider body cap; evicted the "
                     "newest attached image and informed the model."
                 )
-                note = prompts.REQUEST_TOO_LARGE_MESSAGE.format(error=e)
                 # Reuse the recovery note across consecutive failures.
-                last = self._run.messages[-1]
                 self._inject_user(
-                    note,
+                    prompts.REQUEST_TOO_LARGE_MESSAGE.format(error=e),
                     "request_too_large",
-                    replace_last=last.get("role") == "user"
-                    and str(last.get("content")).startswith("Request failed: "),
+                    replace_same_kind=True,
                 )
                 continue
             except Exception as e:
@@ -857,25 +854,28 @@ class Proximus(BaseAgent):
         }
 
     def _inject_user(
-        self, content: str, kind: str, *, replace_last: bool = False
+        self, content: str, kind: str, *, replace_same_kind: bool = False
     ) -> None:
         """Send the model a harness message and record it as a user step, so
-        the trajectory shows everything the model was told. ``replace_last``
-        overwrites the previous message instead of appending one, and its
-        step too when that recorded the same kind of message."""
-        if replace_last:
-            self._run.messages[-1]["content"] = content
-            last = self._steps[-1] if self._steps else None
-            if last is not None and (last.extra or {}).get("harness_message") == kind:
-                self._steps[-1] = last.model_copy(
-                    update={
-                        "message": content,
-                        "timestamp": datetime.now(UTC).isoformat(),
-                    }
-                )
-                return
-        else:
-            self._run.messages.append({"role": "user", "content": content})
+        the trajectory shows everything the model was told. With
+        ``replace_same_kind``, a message of the same kind that is still the
+        last one is overwritten, with its step, instead of appending one; any
+        other note (an invalid image's guidance) stays."""
+        last_step = self._steps[-1] if self._steps else None
+        last = self._run.messages[-1] if self._run.messages else {}
+        if (
+            replace_same_kind
+            and last_step is not None
+            and (last_step.extra or {}).get("harness_message") == kind
+            and last.get("role") == "user"
+            and last.get("content") == last_step.message
+        ):
+            last["content"] = content
+            self._steps[-1] = last_step.model_copy(
+                update={"message": content, "timestamp": datetime.now(UTC).isoformat()}
+            )
+            return
+        self._run.messages.append({"role": "user", "content": content})
         self._add_step("user", content, extra={"harness_message": kind})
 
     def _add_step(

@@ -2445,6 +2445,76 @@ async def test_invalid_image_is_removed_and_error_returned_to_model(
     assert "call `view_image` again" in notes[0]
 
 
+async def test_a_request_too_large_note_keeps_the_invalid_image_guidance(
+    tmp_path, monkeypatch
+):
+    """A 413 right after an invalid image adds its note: overwriting the
+    image's would drop the guidance to fix the source image."""
+    from openworld_harness.prompts import (
+        INVALID_IMAGE_MESSAGE,
+        REQUEST_TOO_LARGE_MESSAGE,
+    )
+
+    def view(call_id: str, path: str) -> FakeResponse:
+        return FakeResponse(
+            FakeMessage(
+                content="look",
+                tool_calls=[
+                    FakeToolCall(call_id, "view_image", json.dumps({"path": path}))
+                ],
+            )
+        )
+
+    invalid_image = RuntimeError(
+        '{"code":"invalid_image","error":"Image dimensions 19x2 are too '
+        'small. Both width and height must be at least 8 pixels."}'
+    )
+    too_large = RuntimeError(
+        '{"code":"RequestEntityTooLarge","message":"Request body size '
+        'exceeds maximum allowed size: 10485760 bytes"}'
+    )
+    fake = FakeCompletion(
+        [
+            view("c1", "/app/a.png"),
+            view("c2", "/app/b.png"),
+            invalid_image,
+            too_large,
+            bash_response("echo recovered"),
+            *finish_responses(),
+        ]
+    )
+    monkeypatch.setattr(litellm, "acompletion", fake)
+    monkeypatch.setattr(litellm, "supports_vision", lambda model: True)
+    png = make_tiny_png()
+
+    class ImageEnv(FakeEnv):
+        async def download_file(self, source_path, target_path):
+            from pathlib import Path
+
+            Path(target_path).write_bytes(png)
+
+    agent = make_agent(tmp_path)
+    await agent.run("Task", ImageEnv(), AgentContext())  # type: ignore[arg-type]
+
+    notes = [
+        INVALID_IMAGE_MESSAGE.format(error=invalid_image),
+        REQUEST_TOO_LARGE_MESSAGE.format(error=too_large),
+    ]
+    in_context = [
+        m["content"]
+        for m in read_messages(agent)
+        if m.get("role") == "user"
+        and str(m.get("content", "")).startswith("Request failed: ")
+    ]
+    recorded = [
+        s["message"]
+        for s in read_trajectory(agent)["steps"]
+        if (s.get("extra") or {}).get("harness_message")
+        in {"invalid_image", "request_too_large"}
+    ]
+    assert in_context == recorded == notes
+
+
 async def test_image_count_limit_compacts_instead_of_repeated_eviction(
     tmp_path, monkeypatch
 ):
