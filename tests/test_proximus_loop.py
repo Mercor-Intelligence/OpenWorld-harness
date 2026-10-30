@@ -1834,6 +1834,21 @@ async def test_default_effort_requests_ask_for_reasoning_summaries(
         assert "extra_body" not in call
 
 
+async def test_an_older_litellm_is_not_asked_for_summaries(tmp_path, monkeypatch):
+    """A litellm that cannot strip the alias would send it to Chat Completions,
+    which rejects unknown arguments."""
+    fake = FakeCompletion(finish_responses())
+    monkeypatch.setattr(litellm, "acompletion", fake)
+    monkeypatch.delattr(
+        litellm.utils, "strip_reasoning_summary_aliases_from_optional_params"
+    )
+
+    agent = make_bridged_agent(tmp_path, reasoning_effort=None)
+    await agent.run("Task", FakeEnv(), AgentContext())  # type: ignore[arg-type]
+
+    assert "extra_body" not in fake.calls[0]
+
+
 async def test_requests_without_tools_ask_for_no_summary(tmp_path, monkeypatch):
     fake = FakeCompletion([text_response("done")])
     monkeypatch.setattr(litellm, "acompletion", fake)

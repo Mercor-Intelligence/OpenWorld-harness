@@ -379,6 +379,14 @@ def _keep_every_reasoning_item(choices: list[Any], output_items: list[Any]) -> N
         message.reasoning_items = reasoning
 
 
+def _litellm_strips_summary_alias() -> bool:
+    """Whether this litellm removes a reasoning_summary alias from chat-path
+    requests; an older one would send it on, and Chat Completions rejects it."""
+    return hasattr(
+        litellm.utils, "strip_reasoning_summary_aliases_from_optional_params"
+    )
+
+
 def _install_litellm_reasoning_only_patch() -> None:
     """Accept reasoning-only Responses output and keep every reasoning item,
     so neither encrypted CoT nor summaries are lost."""
@@ -889,7 +897,11 @@ class LLM:
             if self.session_id:
                 extra_body["prompt_cache_key"] = self.session_id
             completion_kwargs["extra_body"] = extra_body
-        elif tools is not None and self.is_openai_reasoning_series():
+        elif (
+            tools is not None
+            and self.is_openai_reasoning_series()
+            and _litellm_strips_summary_alias()
+        ):
             # Without an effort litellm still sends gpt-5.4+ with tools to
             # /v1/responses, so ask for summaries here too. litellm maps this
             # alias to reasoning.summary on that path and strips it on the
