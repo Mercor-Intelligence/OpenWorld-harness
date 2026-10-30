@@ -407,7 +407,13 @@ def _install_litellm_reasoning_only_patch() -> None:
         choices = orig(output_items, handle_raw_dict_callback=handle_raw_dict_callback)
         items = list(output_items or [])
         if choices:
-            _keep_every_reasoning_item(choices, items)
+            try:
+                _keep_every_reasoning_item(choices, items)
+            except Exception:  # best effort: LiteLLM's own choices still stand
+                logging.getLogger(__name__).warning(
+                    "Could not restore the reasoning items LiteLLM dropped.",
+                    exc_info=True,
+                )
             return choices
         if items and all(_is_reasoning_output_item(item) for item in items):
             return _choices_from_reasoning_only_output(items)

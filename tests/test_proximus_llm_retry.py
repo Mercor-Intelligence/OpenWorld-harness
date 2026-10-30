@@ -695,3 +695,40 @@ def test_consecutive_reasoning_items_are_all_kept():
     assert [i["id"] for i in choice.message.reasoning_items] == ["rs_2"]
     assert choice.message.reasoning_content == "Counting sums of squares."
     assert len(choice.message.tool_calls) == 2
+
+
+def test_a_failing_reasoning_restore_keeps_litellms_choices(monkeypatch, caplog):
+    """The restore is best effort: if it raises, the response must still
+    arrive as LiteLLM converted it, not fail the request."""
+    from litellm.completion_extras.litellm_responses_transformation.transformation import (
+        LiteLLMResponsesTransformationHandler,
+    )
+    from openai.types.responses import (
+        ResponseOutputMessage,
+        ResponseOutputText,
+        ResponseReasoningItem,
+    )
+
+    import openworld_harness.llm as llm_mod
+
+    llm_mod._install_litellm_reasoning_only_patch()
+
+    def broken(choices, output_items):
+        raise TypeError("unexpected summary shape")
+
+    monkeypatch.setattr(llm_mod, "_keep_every_reasoning_item", broken)
+    convert = LiteLLMResponsesTransformationHandler._convert_response_output_to_choices
+    items = [
+        ResponseReasoningItem(id=f"rs_{i}", type="reasoning", summary=[])
+        for i in (1, 2)
+    ]
+    answer = ResponseOutputMessage(
+        id="msg_1",
+        type="message",
+        role="assistant",
+        status="completed",
+        content=[ResponseOutputText(type="output_text", text="113", annotations=[])],
+    )
+    (choice,) = convert([*items, answer])
+    assert choice.message.content == "113"
+    assert "Could not restore the reasoning items" in caplog.text
