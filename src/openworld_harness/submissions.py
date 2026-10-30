@@ -291,6 +291,20 @@ class Submissions:
         winner = self._winner()
         return None if winner is None else winner["index"]
 
+    def _ungraded_snapshot(self, winner: str) -> str | None:
+        """The end-of-run snapshot the harness committed when it is not the
+        winner. Restore unwinds it, or checking out the winner would delete
+        the files the snapshot began tracking."""
+        last = self._submissions[-1] if self._submissions else {}
+        if (
+            last.get("ok")
+            and last.get("auto")
+            and last.get("harness_commit")
+            and last.get("hash") != winner
+        ):
+            return last["hash"]
+        return None
+
     async def restore_winner(self) -> bool:
         """Restore the winning commit; True once the workspace holds it. A
         dead sandbox raises EnvironmentGoneError; other failures are logged."""
@@ -301,7 +315,11 @@ class Submissions:
         try:
             result = await self._git_exec(
                 utils.read_script("restore_winner.sh"),
-                {"wd": self._workdir, "winner": winner},
+                {
+                    "wd": self._workdir,
+                    "winner": winner,
+                    "unwind": self._ungraded_snapshot(winner) or "",
+                },
                 RESTORE_TIMEOUT_SEC,
             )
         except tools.EnvironmentGoneError:

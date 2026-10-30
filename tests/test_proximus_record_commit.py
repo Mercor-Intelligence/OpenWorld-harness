@@ -169,6 +169,39 @@ async def test_auto_submit_on_dirty_tree_flags_auto_and_harness_commit(workspace
     assert row["harness_commit"] is True
 
 
+async def test_restoring_past_the_exit_snapshot_keeps_its_files(workspace):
+    """The model commits A and leaves an output untracked; the exit snapshot B
+    tracks it, but A is graded (H7). The restore must leave what checking out
+    A would have left without B: the output stays, tracked edits revert."""
+    repo, home, subs = workspace
+    (repo / "main.py").write_text("print('v2')\n")
+    git(repo, home, "commit", "-qam", "fix", "--no-verify")
+    a = git(repo, home, "rev-parse", "HEAD")
+    await subs.submit(a)
+    (repo / "out.csv").write_text("1,2\n")
+    (repo / "main.py").write_text("print('v3, unsubmitted')\n")
+    b = (await subs.submit("", auto=True)).hash
+    assert b != a and subs.winner_hash() == a
+
+    assert await subs.restore_winner()
+
+    assert git(repo, home, "rev-parse", "HEAD") == a
+    assert git(repo, home, "rev-parse", "refs/proximus/end-state") == b
+    assert (repo / "out.csv").read_text() == "1,2\n"
+    assert (repo / "main.py").read_text() == "print('v2')\n"
+
+
+async def test_a_graded_exit_snapshot_is_restored_as_is(workspace):
+    repo, home, subs = workspace
+    (repo / "out.csv").write_text("1,2\n")
+    b = (await subs.submit("", auto=True)).hash
+
+    assert await subs.restore_winner()
+
+    assert git(repo, home, "rev-parse", "HEAD") == b
+    assert "out.csv" in git(repo, home, "ls-files")
+
+
 async def test_matches_winner_tracks_the_live_tree(workspace):
     # Dedup semantics: a bare ref matches the winner only while the live
     # tree still equals it — new work must read as "does not match" so a

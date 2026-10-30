@@ -31,7 +31,9 @@ this harness keeps; the model-facing prompts still call the agent Proximus.
   the exit submit or restore raises once the artifacts are saved, so Harbor records
   an error and runs no verifier instead of grading a stale tree.
 - The model's own submission wins. The exit snapshot is still recorded, but it is
-  graded only when the model recorded no submission itself.
+  graded only when the model recorded no submission itself. Otherwise the restore
+  undoes the snapshot's commit before checking out the winner, so files the model
+  left untracked stay in the workspace, as they would without the snapshot.
 - Snapshot staging is time-limited: `git add -A` gets `submission_timeout_sec`
   minus 60 s (at least 30 s). On a timeout the index lock and partial objects are
   removed and the model is told how to shrink the commit; a leftover `index.lock`
