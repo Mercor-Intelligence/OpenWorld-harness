@@ -767,6 +767,22 @@ class TestConsecutiveExecFailures:
         # Only the probe reached the sandbox, once, with no working directory.
         assert [(c["command"], c["cwd"]) for c in env.exec_calls] == [("true", None)]
 
+    async def test_a_probe_that_only_times_out_is_inconclusive(self):
+        n = MAX_CONSECUTIVE_EXEC_FAILURES
+
+        class SlowProbeEnv(FakeEnv):
+            async def exec(
+                self, command, cwd=None, env=None, timeout_sec=None, user=None
+            ):
+                if env is None:  # the probe; bash passes its exec env
+                    raise TimeoutError()
+                raise RuntimeError("grpc: deadline exceeded")
+
+        executor = make_executor(SlowProbeEnv())
+        for _ in range(n + 1):
+            result = await self.call(executor)
+            assert result.is_error and "grpc: deadline exceeded" in result.content
+
     async def test_timeouts_and_undecodable_output_are_not_counted(self):
         class MixedEnv(FakeEnv):
             def __init__(self):

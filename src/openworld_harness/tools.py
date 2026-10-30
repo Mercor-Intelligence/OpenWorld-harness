@@ -399,11 +399,16 @@ class ToolExecutor:
         )
 
     async def _sandbox_answers(self) -> bool:
-        """Whether a trivial command still runs in the sandbox."""
+        """Whether a trivial command still runs in the sandbox. A probe that
+        only times out is inconclusive (an overloaded sandbox is slow, a dead
+        one refuses at once), so it counts as alive."""
         try:
             result = await self._environment.exec(
                 "true", timeout_sec=LIVENESS_PROBE_TIMEOUT_SEC
             )
+        except TimeoutError as e:
+            raise_if_environment_gone(e)
+            return True
         except Exception as e:
             raise_if_environment_gone(e)
             return False
