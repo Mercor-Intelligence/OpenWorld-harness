@@ -49,11 +49,14 @@ else
         marker=$(mktemp 2>/dev/null) || marker=""
         staged=0
         timeout -k 10 "$stage_timeout" git add -A 2>/dev/null || staged=$?
-        if [ "$staged" -eq 124 ] || [ "$staged" -eq 137 ]; then
+        # Timed out: GNU timeout exits 124, or 137 after -k; busybox's execs
+        # git, which then dies of the TERM itself (143).
+        if [ "$staged" -eq 124 ] || [ "$staged" -eq 137 ] \
+            || [ "$staged" -eq 143 ]; then
             rm -f "$gitdir/index.lock"
             if [ -n "$marker" ]; then
-                find "$gitdir/objects" -type f -name 'tmp_*' -newer "$marker" \
-                    -exec rm -f {} + 2>/dev/null
+                timeout 20 find "$gitdir/objects" -type f -name 'tmp_*' \
+                    -newer "$marker" -exec rm -f {} + 2>/dev/null
                 rm -f "$marker"
             fi
             echo "Staging (git add -A) did not finish within ${stage_timeout}s;" \

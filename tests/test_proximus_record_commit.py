@@ -197,12 +197,22 @@ def shimmed(subs: Submissions, home: Path, bin_dir: Path) -> Submissions:
     return subs
 
 
+@pytest.mark.parametrize("busybox", [False, True])
 async def test_staging_that_outlasts_its_limit_is_cleaned_up(
-    workspace, tmp_path, monkeypatch
+    workspace, tmp_path, monkeypatch, busybox
 ):
     import openworld_harness.submissions as submissions_module
 
     repo, home, subs = workspace
+    if busybox:
+        # busybox's timeout execs the program, so a TERM-killed git add
+        # exits 143 instead of GNU's 124.
+        real_timeout = shutil.which("timeout")
+        shim(
+            tmp_path / "bin",
+            "timeout",
+            f'{real_timeout} "$@"; rc=$?; [ "$rc" -eq 124 ] && exit 143; exit "$rc"',
+        )
     monkeypatch.setattr(submissions_module, "MIN_STAGE_TIMEOUT_SEC", 1)
     monkeypatch.setattr(submissions_module, "STAGE_RESERVE_SEC", 29)
     subs._submission_timeout_sec = 30  # staging gets 1 s
