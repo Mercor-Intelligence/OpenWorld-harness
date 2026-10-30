@@ -97,7 +97,28 @@ FIELD_VALUES: dict[str, Any] = {
     "api_base": "http://127.0.0.1:9/v1",
     "max_thinking_tokens": 2048,
     "model_info": {"max_input_tokens": 77777, "supports_vision": False},
+    # Web options are run options: they round-trip as overrides, not task keys.
+    "web_snapshot_as_of": "2026-06-01T00:00:00Z",
+    "web_max_searches": 7,
+    "web_max_fetches": 9,
+    "web_fetch_chars": 2000,
+    "web_show_dates": True,
+    "web_notes": False,
+    "web_notes_items": 3,
+    "web_extractor_reasoning_effort": "low",
+    "web_gate": False,
+    "web_gate_jaccard": 0.5,
+    "web_gate_novelty": 0.2,
+    "web_gate_patience": 3,
 }
+
+
+def web_overrides(values: dict[str, Any]) -> dict[str, Any]:
+    """The web options among ``values``, with the cutoff that turns them on."""
+    web = {k: v for k, v in values.items() if k.startswith("web_")}
+    return (
+        {"web_snapshot_as_of": FIELD_VALUES["web_snapshot_as_of"], **web} if web else {}
+    )
 
 
 def test_values_cover_every_field():
@@ -122,10 +143,15 @@ def test_every_field_round_trips_through_task_toml_and_factory(
     if field == "api_key_env":
         monkeypatch.setenv(value, "roundtrip-key")
 
-    kwargs = task_agent_kwargs(write_task(task_dir, {field: value}), MODEL)
-    assert kwargs[field] == expected
-    # No [agent].timeout_sec and no /app artifact: nothing else is defaulted.
-    assert set(kwargs) == {field}
+    if field.startswith("web_"):
+        overrides = web_overrides({field: value})
+        kwargs = task_agent_kwargs(write_task(task_dir, {}), MODEL, overrides)
+        assert kwargs == overrides
+    else:
+        kwargs = task_agent_kwargs(write_task(task_dir, {field: value}), MODEL)
+        assert kwargs[field] == expected
+        # No [agent].timeout_sec and no /app artifact: nothing else is defaulted.
+        assert set(kwargs) == {field}
 
     agent = make_agent(kwargs, tmp_path / "logs")
     assert getattr(agent.config, field) == expected
@@ -140,6 +166,10 @@ def test_every_field_round_trips_through_task_toml_and_factory(
         assert "view_image" in agent._tools
     if field == "api_key_env":
         assert agent._llm._api_key == "roundtrip-key"
+    if field.startswith("web_"):
+        assert {"web_search", "web_fetch"} <= set(agent._tools)
+    else:
+        assert not {"web_search", "web_fetch"} & set(agent._tools)
 
 
 def test_all_fields_together(tmp_path, monkeypatch):
@@ -149,7 +179,10 @@ def test_all_fields_together(tmp_path, monkeypatch):
     (task_dir / "prompt.j2").write_text("{{ instruction }}")
     # max_thinking_tokens and reasoning_effort are mutually exclusive.
     values = {k: v for k, v in FIELD_VALUES.items() if k != "max_thinking_tokens"}
-    kwargs = task_agent_kwargs(write_task(task_dir, values), MODEL)
+    table = {k: v for k, v in values.items() if not k.startswith("web_")}
+    kwargs = task_agent_kwargs(
+        write_task(task_dir, table), MODEL, web_overrides(values)
+    )
     agent = make_agent(kwargs, tmp_path / "logs")
     for field, value in values.items():
         if field == "prompt_template_path":
@@ -190,6 +223,14 @@ def test_all_fields_together(tmp_path, monkeypatch):
         pytest.param(
             f'[agent.proximus.models."{MODEL}"]\nreasoning_efort = "max"\n',
             id="typo-in-model-table",
+        ),
+        pytest.param(
+            '[agent.proximus]\nweb_snapshot_as_of = "2026-06-01"\n',
+            id="web-option-in-task-table",
+        ),
+        pytest.param(
+            f'[agent.proximus.models."{MODEL}"]\nweb_max_searches = 3\n',
+            id="web-option-in-model-table",
         ),
     ],
 )
@@ -241,7 +282,14 @@ def test_thinking_controls_are_exclusive(tmp_path):
 
 @pytest.mark.parametrize(
     "kwargs",
-    [{"max_turn": 3}, {"max_turns": "three"}, {"compaction_threshold": 0}],
+    [
+        {"max_turn": 3},
+        {"max_turns": "three"},
+        {"compaction_threshold": 0},
+        {"web_max_searches": 3},  # web options without the cutoff
+        {"web_snapshot_as_of": "not a date"},
+        {"web_snapshot_as_of": "2999-01-01"},  # Exa refuses future cutoffs
+    ],
 )
 def test_bad_kwargs_fail_at_construction(tmp_path, kwargs):
     with pytest.raises(ValueError):

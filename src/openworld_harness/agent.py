@@ -11,15 +11,13 @@ from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
 import openworld_harness.sandbox_git as sandbox_git
-from openworld_harness.config import OpenWorldConfig
-from openworld_harness.proximus import Proximus
+from openworld_harness.web.agent import WebTools
 
 
-class OpenWorldHarness(Proximus):
-    """Long-horizon, native-function-calling agent harness."""
-
-    options_model = OpenWorldConfig
-    config: OpenWorldConfig
+class OpenWorldHarness(WebTools):
+    """Long-horizon, native-function-calling agent harness: the Proximus core,
+    the web tools when ``web_snapshot_as_of`` is set (web.agent), and the setup
+    steps of sandbox_git."""
 
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)

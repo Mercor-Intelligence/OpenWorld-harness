@@ -30,7 +30,7 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-from openworld_harness.config import OpenWorldConfig
+from openworld_harness.config import WEB_OPTION_PREFIX, OpenWorldConfig
 from openworld_harness.submissions import (
     DEFAULT_SUBMISSION_TIMEOUT_SEC,
     RESTORE_TIMEOUT_SEC,
@@ -108,6 +108,14 @@ def task_agent_kwargs(
     if not isinstance(model_table, dict):
         raise ValueError(f'[agent.{name}.models."{model_name}"] must be a table')
 
+    for layer in (table, model_table):
+        web = sorted(key for key in layer if key.startswith(WEB_OPTION_PREFIX))
+        if web:
+            # Whether a run may search the web, and as of when, is the runner's call.
+            raise ValueError(
+                f"[agent.{name}] in {task_dir} sets {', '.join(web)}: web options are "
+                "run options, passed as overrides"
+            )
     # Relative template paths in the task's own tables are task-relative.
     for layer in (table, model_table):
         template = layer.get("prompt_template_path")
