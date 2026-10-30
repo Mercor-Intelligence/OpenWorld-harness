@@ -160,19 +160,29 @@ async def test_auto_submit_on_dirty_tree_flags_auto_and_harness_commit(workspace
     # The end-of-run auto-submission goes through the same argless path;
     # when the tree moved, the row carries BOTH flags.
     repo, home, subs = workspace
+    baseline = git(repo, home, "rev-parse", "HEAD")
     (repo / "late.py").write_text("print('kill-time work')\n")
 
-    await subs.submit("", auto=True)
+    submission = await subs.submit("", auto=True)
 
     row = json.loads((subs._record_path).read_text())
     assert row["auto"] is True
     assert row["harness_commit"] is True
+    # Committed beside HEAD: HEAD and the index are as the model left them.
+    assert git(repo, home, "rev-parse", "HEAD") == baseline
+    assert git(repo, home, "status", "--porcelain") == "?? late.py"
+    assert git(repo, home, "rev-parse", f"{submission.hash}^") == baseline
+    assert "late.py" in git(repo, home, "ls-tree", "--name-only", submission.hash)
+    assert not list((repo / ".git").glob("proximus-snapshot-index*"))
+    # A clean tree reuses HEAD, as a bare submit does.
+    (repo / "late.py").unlink()
+    assert (await subs.submit("", auto=True)).hash == baseline
 
 
 async def test_restoring_past_the_exit_snapshot_keeps_its_files(workspace):
     """The model commits A and leaves an output untracked; the exit snapshot B
-    tracks it, but A is graded (H7). The restore must leave what checking out
-    A would have left without B: the output stays, tracked edits revert."""
+    has it, but A is graded (H7). The restore must leave what checking out A
+    would have left without B: the output stays, tracked edits revert."""
     repo, home, subs = workspace
     (repo / "main.py").write_text("print('v2')\n")
     git(repo, home, "commit", "-qam", "fix", "--no-verify")
@@ -186,7 +196,7 @@ async def test_restoring_past_the_exit_snapshot_keeps_its_files(workspace):
     assert await subs.restore_winner()
 
     assert git(repo, home, "rev-parse", "HEAD") == a
-    assert git(repo, home, "rev-parse", "refs/proximus/end-state") == b
+    assert git(repo, home, "rev-parse", "refs/proximus/submissions/2") == b
     assert (repo / "out.csv").read_text() == "1,2\n"
     assert (repo / "main.py").read_text() == "print('v2')\n"
 
@@ -230,9 +240,11 @@ def shimmed(subs: Submissions, home: Path, bin_dir: Path) -> Submissions:
     return subs
 
 
-@pytest.mark.parametrize("busybox", [False, True])
+@pytest.mark.parametrize(
+    ("busybox", "auto"), [(False, False), (True, False), (False, True)]
+)
 async def test_staging_that_outlasts_its_limit_is_cleaned_up(
-    workspace, tmp_path, monkeypatch, busybox
+    workspace, tmp_path, monkeypatch, busybox, auto
 ):
     import openworld_harness.submissions as submissions_module
 
@@ -256,7 +268,7 @@ async def test_staging_that_outlasts_its_limit_is_cleaned_up(
         "git",
         f'if [ "$1" = add ]; then\n'
         f"  d=$({real_git} rev-parse --git-dir)\n"
-        f'  touch "$d/index.lock" "$d/objects/pack/tmp_pack_ours"\n'
+        f'  touch "${{GIT_INDEX_FILE:-$d/index}}.lock" "$d/objects/pack/tmp_pack_ours"\n'
         f"  exec sleep 30\n"
         f"fi\n"
         f'exec {real_git} "$@"',
@@ -266,18 +278,43 @@ async def test_staging_that_outlasts_its_limit_is_cleaned_up(
     os.utime(old_pack, (1_000_000_000, 1_000_000_000))
     (repo / "big.bin").write_bytes(b"x" * 4096)  # untracked: listed as a hint
 
+    baseline = git(repo, home, "rev-parse", "HEAD")
     with pytest.raises(SubmissionError) as excinfo:
-        await shimmed(subs, home, tmp_path / "bin").submit("")
+        await shimmed(subs, home, tmp_path / "bin").submit("", auto=auto)
     message = str(excinfo.value)
     assert "did not finish within 1s" in message
     assert "add them to .gitignore" in message
     assert "big.bin" in message
-    assert not (repo / ".git" / "index.lock").exists()
+    assert not list((repo / ".git").glob("*.lock"))
+    assert not list((repo / ".git").glob("proximus-snapshot-index*"))
+    assert git(repo, home, "rev-parse", "HEAD") == baseline
     assert not (repo / ".git" / "objects" / "pack" / "tmp_pack_ours").exists()
     assert old_pack.exists()  # an older temp file is not ours to remove
     refs = git(repo, home, "for-each-ref", "refs/proximus")
     assert refs == ""
     assert [row["ok"] for row in subs.summary()] == [False]
+
+
+async def test_an_exit_snapshot_cut_short_after_its_commit_moves_nothing(
+    workspace, tmp_path
+):
+    """The exec can time out after the snapshot commit (the chown of .git on a
+    huge repository): the failed row must not leave HEAD on the snapshot, or
+    restoring the winner would delete what only the snapshot tracked."""
+    repo, home, subs = workspace
+    a = git(repo, home, "rev-parse", "HEAD")
+    await subs.submit(a)
+    (repo / "out.csv").write_text("1,2\n")
+    shim(tmp_path / "bin", "chown", "exec sleep 3")
+    subs = shimmed(subs, home, tmp_path / "bin")
+    subs._submission_timeout_sec = 1
+
+    with pytest.raises(SubmissionError):
+        await subs.submit("", auto=True)
+
+    assert git(repo, home, "rev-parse", "HEAD") == a
+    assert await subs.restore_winner()
+    assert (repo / "out.csv").read_text() == "1,2\n"
 
 
 async def test_a_leftover_index_lock_fails_with_guidance(workspace):

@@ -1,13 +1,17 @@
 # Pin $commit as submission #$idx (a submission IS a git commit).
-# Inputs arrive as exec ENV VARS — wd, commit, idx, stage_timeout — never
-# spliced into this script, so there is nothing to shell-quote. Runs as root: the agent user
+# Inputs arrive as exec ENV VARS — wd, commit, idx, stage_timeout, keep_head —
+# never spliced into this script, so there is nothing to shell-quote. Runs as root: the agent user
 # often cannot invoke git (task images wrap or hide it), so harness git
 # must not inherit default_user.
 #
 # Empty / HEAD means "snapshot the live workspace": the model cannot commit
 # when git is disabled, so HEAD is stale. An explicit ref that resolves is
 # pinned as-is; an explicit ref that does not resolve fails (the model
-# named a commit that is not in this repo).
+# named a commit that is not in this repo). With keep_head=1 (the exit
+# snapshot) the snapshot is staged on a private index and made with
+# commit-tree: HEAD and the index stay as the model left them, so restoring
+# an older submission keeps the files the model never tracked, and a
+# snapshot cut short moves nothing.
 # stdout contract (parsed by submissions.py): `subject=<s>` then `hash=<sha>`,
 # plus `committed=1` when the harness itself made the commit.
 cd "$wd" || { echo "workspace directory missing" >&2; exit 3; }
@@ -42,6 +46,14 @@ else
             "that file and submit again." >&2
         exit 9
     fi
+    index="$gitdir/index"
+    if [ "$keep_head" = 1 ]; then
+        index="$(cd "$gitdir" && pwd -P)/proximus-snapshot-index"
+        rm -f "$index" "$index.lock"
+        cp "$gitdir/index" "$index" 2>/dev/null || true  # its stat cache
+        GIT_INDEX_FILE=$index
+        export GIT_INDEX_FILE
+    fi
     # Within stage_timeout seconds, where the image's timeout supports -k:
     # staging a huge workspace must not use up the submission's time, and
     # TERM first lets git remove its own lock. Old busybox stages unbounded.
@@ -53,7 +65,11 @@ else
         # git, which then dies of the TERM itself (143).
         if [ "$staged" -eq 124 ] || [ "$staged" -eq 137 ] \
             || [ "$staged" -eq 143 ]; then
-            rm -f "$gitdir/index.lock"
+            rm -f "$index.lock"
+            if [ "$keep_head" = 1 ]; then
+                rm -f "$index"
+                unset GIT_INDEX_FILE
+            fi
             if [ -n "$marker" ]; then
                 timeout 20 find "$gitdir/objects" -type f -name 'tmp_*' \
                     -newer "$marker" -exec rm -f {} + 2>/dev/null
@@ -75,7 +91,26 @@ else
     else
         git add -A 2>/dev/null || true
     fi
-    if git rev-parse -q --verify HEAD^{commit} >/dev/null \
+    if [ "$keep_head" = 1 ]; then
+        tree=$(git write-tree 2>/dev/null) || tree=""
+        rm -f "$index"
+        unset GIT_INDEX_FILE
+        [ -n "$tree" ] || {
+            echo "could not snapshot the current workspace" >&2
+            exit 5
+        }
+        head=$(git rev-parse -q --verify HEAD^{commit}) || head=""
+        if [ -n "$head" ] && [ "$tree" = "$(git rev-parse "$head^{tree}")" ]; then
+            full=$head
+        else
+            full=$(git commit-tree "$tree" ${head:+-p "$head"} \
+                -m "Proximus submission snapshot" 2>/dev/null) || {
+                echo "could not snapshot the current workspace" >&2
+                exit 5
+            }
+            made_commit=1
+        fi
+    elif git rev-parse -q --verify HEAD^{commit} >/dev/null \
         && git diff --cached --quiet \
         && git diff --quiet; then
         full=$(git rev-parse HEAD)

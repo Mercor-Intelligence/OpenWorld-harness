@@ -114,12 +114,13 @@ class Submissions:
         ``SubmissionError`` after recording the failure; a dead sandbox
         propagates as ``EnvironmentGoneError`` before anything is recorded.
         ``auto`` marks the harness's end-of-run submission so analysis can
-        tell it from ones the model chose to make."""
+        tell it from ones the model chose to make; it is committed without
+        moving HEAD or the index."""
         started = time.monotonic()
         try:
             # Pinned under the row's number, the one the model is shown.
             hash_, description, harness_committed = await self._resolve_and_pin(
-                len(self._submissions) + 1, ref
+                len(self._submissions) + 1, ref, keep_head=auto
             )
         except SubmissionError as e:
             failure: dict[str, Any] = {
@@ -181,10 +182,13 @@ class Submissions:
             return False
         return result.return_code == 0
 
-    async def _resolve_and_pin(self, index: int, ref: str) -> tuple[str, str, bool]:
+    async def _resolve_and_pin(
+        self, index: int, ref: str, *, keep_head: bool = False
+    ) -> tuple[str, str, bool]:
         """Run ``record_commit.sh``; returns (hash, subject,
-        harness_committed). Raises ``SubmissionError`` with model-readable
-        guidance."""
+        harness_committed). ``keep_head`` snapshots without moving HEAD or
+        the index (the exit snapshot). Raises ``SubmissionError`` with
+        model-readable guidance."""
         try:
             result = await self._git_exec(
                 utils.read_script("record_commit.sh"),
@@ -193,6 +197,7 @@ class Submissions:
                     "commit": ref,
                     "idx": str(int(index)),
                     "stage_timeout": self._stage_timeout_sec(),
+                    "keep_head": "1" if keep_head else "",
                 },
                 self._submission_timeout_sec,
             )
@@ -288,20 +293,6 @@ class Submissions:
         winner = self._winner()
         return None if winner is None else winner["index"]
 
-    def _ungraded_snapshot(self, winner: str) -> str | None:
-        """The end-of-run snapshot the harness committed when it is not the
-        winner. Restore unwinds it, or checking out the winner would delete
-        the files the snapshot began tracking."""
-        last = self._submissions[-1] if self._submissions else {}
-        if (
-            last.get("ok")
-            and last.get("auto")
-            and last.get("harness_commit")
-            and last.get("hash") != winner
-        ):
-            return last["hash"]
-        return None
-
     async def restore_winner(self) -> bool:
         """Restore the winning commit; True once the workspace holds it. A
         dead sandbox raises EnvironmentGoneError; other failures are logged."""
@@ -312,11 +303,7 @@ class Submissions:
         try:
             result = await self._git_exec(
                 utils.read_script("restore_winner.sh"),
-                {
-                    "wd": self._workdir,
-                    "winner": winner,
-                    "unwind": self._ungraded_snapshot(winner) or "",
-                },
+                {"wd": self._workdir, "winner": winner},
                 RESTORE_TIMEOUT_SEC,
             )
         except tools.EnvironmentGoneError:

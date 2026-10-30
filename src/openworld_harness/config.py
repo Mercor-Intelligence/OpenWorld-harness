@@ -28,8 +28,8 @@ class ProximusConfig(AgentOptions):
     auto_submit_on_exit: bool = True
     """When the run ends, save any unsubmitted work as a final submission, so a
     run that times out without submitting is still graded on its last state.
-    It is recorded but not graded when the model submitted anything itself;
-    the restore then leaves untracked files in place, as without it.
+    It is recorded but not graded when the model submitted anything itself.
+    It never moves HEAD or the index, so untracked files survive the restore.
     Skipped if nothing changed since the last submission."""
 
     restore_on_exit: bool = True

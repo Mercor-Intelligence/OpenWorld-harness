@@ -210,6 +210,7 @@ async def test_submit_resolves_and_pins_the_ref(tmp_path: Path):
         "commit": "HEAD",
         "idx": "1",
         "stage_timeout": str(DEFAULT_SUBMISSION_TIMEOUT_SEC - 60),
+        "keep_head": "",
     }
     # The ref is resolved to a full SHA NOW (HEAD moves, short hashes and
     # branch names drift) and pinned under refs/proximus/submissions/ so
