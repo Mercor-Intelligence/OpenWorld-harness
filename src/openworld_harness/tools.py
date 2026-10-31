@@ -45,6 +45,7 @@ def _is_environment_transport_loss(error: Exception) -> bool:
         isinstance(error, ConnectionError)
         and (
             "[errno -2] name or service not known" in message
+            or "[errno -5] no address associated with hostname" in message
             or "[errno 111] connect call failed" in message
         )
     ) or (

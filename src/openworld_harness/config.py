@@ -27,6 +27,15 @@ class ProximusConfig(AgentOptions):
     """Seconds allowed for one submission's git work in the sandbox. Large
     workspaces can take minutes to commit."""
 
+    submission_export: bool = True
+    """After each submission the model records, copy the files it changed off
+    the sandbox, into the agent logs' ``winner/`` (``sub.tar``, ``deleted.z``,
+    ``manifest.json``). If the sandbox later dies, a regrade can rebuild the
+    latest recorded submission in a fresh copy of the task image. Runs beside
+    the agent and never blocks a turn; a newer submission replaces the export."""
+    submission_export_max_mb: int | None = Field(default=4096, ge=1)
+    """Largest export, in MB of changed files. A bigger submission is not
+    exported; its manifest says why. None: no limit."""
     auto_submit_on_exit: bool = True
     """When the run ends, save any unsubmitted work as a final submission, so a
     run that times out without submitting is still graded on its last state.
@@ -143,6 +152,39 @@ class OpenWorldConfig(ProximusConfig):
     """Files already in a fresh workspace (not a git repository) that are larger
     than this many MB are added to ``workspace_git_excludes`` at setup, so the
     baseline commit never hashes multi-GB inputs. The files stay in place."""
+
+    large_input_total_mb: int | None = Field(default=None, ge=1)
+    """With ``large_input_exclude_mb``, also exclude the largest remaining files
+    of 1 MB or more until the ones still tracked total at most this many MB.
+    Many medium inputs (sentinel2: 1.33 GB of 5-33 MB arrays) are each under the
+    per-file limit, yet together overrun the baseline commit."""
+
+    sandbox_limits: dict[str, Any] | None = None
+    """The sandbox's resources, told to the model in the first message and
+    written to ``/tmp/proximus/limits.json``: ``cpus``, ``memory_mb``, ``gpus``,
+    ``gpu_type``. Under gVisor ``free``, ``/proc/meminfo`` and ``nproc`` show the
+    host, and going over the memory can kill the whole sandbox, so a model sizing
+    parallel jobs by what it sees can end its own run."""
+
+    @field_validator("sandbox_limits")
+    @classmethod
+    def _limits(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        if value is None:
+            return None
+        allowed = {"cpus", "memory_mb", "gpus", "gpu_type"}
+        unknown = sorted(set(value) - allowed)
+        if unknown:
+            raise ValueError(f"sandbox_limits: unknown keys {unknown}")
+        for key in ("cpus", "memory_mb", "gpus"):
+            item = value.get(key)
+            if item is not None and (
+                isinstance(item, bool) or not isinstance(item, int | float) or item < 0
+            ):
+                raise ValueError(f"sandbox_limits.{key} must be a non-negative number")
+        gpu_type = value.get("gpu_type")
+        if gpu_type is not None and not isinstance(gpu_type, str):
+            raise ValueError("sandbox_limits.gpu_type must be a string")
+        return {k: v for k, v in value.items() if v is not None}
 
     web_snapshot_as_of: str | None = None
     """Turns on ``web_search`` and ``web_fetch`` over Exa Snapshot, pinned to

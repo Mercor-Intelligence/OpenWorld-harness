@@ -198,6 +198,7 @@ def make_bridged_agent(tmp_path, **kwargs) -> OpenWorldHarness:
     """An agent whose model actually satisfies litellm's chat->Responses
     bridge gate (OpenAI, gpt-5.4+, reasoning_effort, tools)."""
     kwargs.setdefault("reasoning_effort", "xhigh")
+    kwargs.setdefault("submission_export", False)
     return OpenWorldHarness(
         logs_dir=tmp_path / "logs",
         model_name="openai/gpt-5.4",
@@ -206,6 +207,10 @@ def make_bridged_agent(tmp_path, **kwargs) -> OpenWorldHarness:
 
 
 def make_agent(tmp_path, **kwargs) -> OpenWorldHarness:
+    """Submission exports are off unless a test asks for them: they run in the
+    background and add sandbox commands most tests do not model
+    (tests/test_sweep_fixes.py covers them)."""
+    kwargs.setdefault("submission_export", False)
     return OpenWorldHarness(
         logs_dir=tmp_path / "logs",
         model_name="openai/gpt-test",
@@ -824,8 +829,13 @@ async def test_harness_messages_are_recorded_in_the_trajectory(tmp_path, monkeyp
         (EMPTY_RESPONSE_MESSAGE, "empty_response"),
         (CONTINUE_OR_CONFIRM_MESSAGE, "continue_or_confirm"),
     ]
-    # Each one follows the turn it answers (the truncated turn is dropped).
-    assert "".join(s["source"][0] for s in steps) == "suuauauaaua"
+    # Each one follows the turn it answers. The truncated turn is dropped from
+    # the conversation; a system step records what was discarded.
+    assert "".join(s["source"][0] for s in steps) == "susuauauaaua"
+    discard = steps[2]["extra"]["discarded_output"]
+    assert (
+        discard["chars"] == len("cut off mid-") and discard["excerpt"] == "cut off mid-"
+    )
 
 
 async def test_opaque_thinking_blocks_do_not_count_as_empty(tmp_path, monkeypatch):

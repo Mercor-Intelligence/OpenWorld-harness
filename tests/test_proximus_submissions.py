@@ -95,10 +95,15 @@ def make_submissions(
 # Injected by Submissions._git_exec on EVERY harness git call: root git refuses the
 # agent-owned repo without safe.directory.
 def git_safe_env(wd: str = "/app") -> dict:
+    """safe.directory for root git, plus uncompressed loose objects."""
     return {
-        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_COUNT": "3",
         "GIT_CONFIG_KEY_0": "safe.directory",
         "GIT_CONFIG_VALUE_0": wd,
+        "GIT_CONFIG_KEY_1": "core.compression",
+        "GIT_CONFIG_VALUE_1": "0",
+        "GIT_CONFIG_KEY_2": "core.looseCompression",
+        "GIT_CONFIG_VALUE_2": "0",
     }
 
 

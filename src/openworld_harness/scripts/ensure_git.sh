@@ -77,6 +77,11 @@ if [ "$status" = initialized ]; then
         --no-verify >/dev/null 2>&1
 fi
 
+# The run's starting point, which a fresh copy of the task image also holds:
+# export_submission.sh diffs submissions against it. Fails harmlessly while
+# HEAD is unborn (an empty workspace): exports then diff against the empty tree.
+git update-ref refs/proximus/baseline HEAD >/dev/null 2>&1 || true
+
 # Root-created .git must not lock the agent out on tasks where the model
 # can still run git.
 if [ -d .git ]; then
@@ -84,5 +89,12 @@ if [ -d .git ]; then
     if [ -n "$owner" ]; then
         chown -R "$owner" .git 2>/dev/null || true
     fi
+fi
+# A repository nested in the workspace is tracked as a gitlink: a submission records only
+# its HEAD commit (none of its files), and the end-of-run restore never touches its tree, so
+# grading reads that directory as the run left it. Report it for the run log.
+nested=$(git ls-files -s 2>/dev/null | awk '$1 == "160000" { print $4 }' | head -5 | tr '\n' ' ')
+if [ -n "$nested" ]; then
+    echo "gitlinks: $nested"
 fi
 echo "$status"

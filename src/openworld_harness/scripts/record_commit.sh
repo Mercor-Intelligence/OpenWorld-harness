@@ -85,11 +85,12 @@ else
             else
                 why="was killed after ${took}s (exit $staged; often out of memory)"
             fi
-            echo "Staging (git add -A) $why;" \
-                "nothing was recorded and partial staging was cleaned up. If" \
-                "large generated files are not part of your result, add them" \
-                "to .gitignore and submit again, or commit only what matters" \
-                "and submit that commit hash." >&2
+            # Short enough to survive submit()'s 500-char middle truncation
+            # with the largest-files list below it.
+            echo "Staging (git add -A) $why; nothing was recorded. If large" \
+                "generated files are not part of your result, add them to" \
+                ".git/info/exclude and submit again, or commit only what" \
+                "matters and submit that commit hash." >&2
             # xargs runs du once even on no input, and du alone sizes ".".
             largest=$(timeout 20 sh -c 'git ls-files -o --exclude-standard -z \
                 | xargs -0 sh -c "[ \$# -gt 0 ] && du -k \"\$@\"" sh 2>/dev/null \

@@ -34,7 +34,9 @@ SUBMIT_TIME_LEFT = (
 
 SUBMIT_CONTINUE_OR_CONFIRM = (
     "You can continue working and submit again later to record an improved "
-    "result — a recorded submission is never lost to later work. If you are "
+    "result — later work never overwrites a recorded submission, and if the "
+    "sandbox itself dies (for example by running out of memory), the run ends "
+    "and your latest recorded submission is graded. If you are "
     "certain nothing more can be gained, call submit again as your ONLY "
     "action in your next message to confirm this as your final submission "
     "and end the run; any other tool call cancels the pending confirmation."
@@ -86,6 +88,17 @@ OUTPUT_LENGTH_MESSAGE = (
 REQUEST_TOO_LARGE_MESSAGE = (
     "Request failed: {error}\n"
     "The most recently attached image was removed from the conversation."
+)
+
+# Replaces each tool output of the newest turn after a provider refusal.
+WITHHELD_OUTPUT = (
+    "[Output withheld: the model provider refused a request that contained it.]"
+)
+
+PROVIDER_REFUSAL_MESSAGE = (
+    "The model provider refused the last request. The output of your most "
+    "recent tool call(s) was withheld from the conversation; the sandbox is "
+    "unchanged. Continue the task."
 )
 
 INVALID_IMAGE_MESSAGE = (
@@ -176,9 +189,13 @@ def handoff_message(
     progress: str | None,
     elapsed: float,
     budget: float | None,
+    *,
+    submissions: str | None = None,
 ) -> str:
     """The compaction boundary message: header, original instruction, model
-    summary, durable notes, remaining budget, footer."""
+    summary, durable notes, the recorded submissions (the harness's own list,
+    which outranks anything the summary says about them), remaining budget,
+    footer."""
     parts = [
         HANDOFF_HEADER,
         f"Original task instruction:\n\n{instruction}",
@@ -193,6 +210,11 @@ def handoff_message(
         parts.append(
             f"Your durable notes, re-read from {PROGRESS_FILE} at the "
             f"compaction boundary:\n\n{progress}"
+        )
+    if submissions:
+        parts.append(
+            "Recorded submissions (the harness's record; it outranks the summary "
+            f"above):\n\n{submissions}"
         )
     if budget:
         remaining = max(0.0, budget - elapsed)

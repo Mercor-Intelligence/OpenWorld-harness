@@ -1,6 +1,8 @@
+import contextlib
 import json
 import logging
 import re
+import shutil
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -11,7 +13,21 @@ from harbor.environments.base import BaseEnvironment
 
 from openworld_harness import tools, utils
 
-GIT_TIMEOUT_SEC = 60
+# The baseline commit hashes the whole fresh workspace; large-input excludes
+# keep it small, and this bound is the backstop (sentinel2's 1.33 GB of inputs
+# overran the old 60 s in every cell).
+GIT_TIMEOUT_SEC = 600
+EXPORT_TIMEOUT_SEC = 900
+# Sandbox staging directory of an export (export_submission.sh).
+EXPORT_SANDBOX_DIR = "/tmp/proximus/export"
+# Harness git writes loose objects uncompressed: zlib was most of the time of
+# staging large incompressible outputs (a 3.4 GB checkpoint took 4.7 min per
+# submit). Halves `git add` time on such files; the model's own git and gc are
+# unaffected.
+_GIT_CONFIG = (
+    ("core.compression", "0"),
+    ("core.looseCompression", "0"),
+)
 DEFAULT_SUBMISSION_TIMEOUT_SEC = 600
 # Of a submission's time, what staging the live workspace may not use: the
 # commit, pin and chown still need it.
@@ -76,14 +92,14 @@ class Submissions:
         git subcommand in every script inherits it, on any task image, without
         mutating the image's git config. Without it, every submit fails on
         an image that lacks the setting, and the trial is left ungradable."""
+        config = (("safe.directory", self._workdir), *_GIT_CONFIG)
+        git_env = {"GIT_CONFIG_COUNT": str(len(config))}
+        for i, (key, value) in enumerate(config):
+            git_env[f"GIT_CONFIG_KEY_{i}"] = key
+            git_env[f"GIT_CONFIG_VALUE_{i}"] = value
         result = await self._environment.exec(
             script,
-            env={
-                "GIT_CONFIG_COUNT": "1",
-                "GIT_CONFIG_KEY_0": "safe.directory",
-                "GIT_CONFIG_VALUE_0": self._workdir,
-                **env,
-            },
+            env={**git_env, **env},
             timeout_sec=timeout_sec,
             user="root",
         )
@@ -108,6 +124,14 @@ class Submissions:
                 f"workspace cannot host submissions: "
                 f"{tools.truncate_middle(detail, 300)}"
             )
+        for line in str(result.stdout or "").splitlines():
+            if line.startswith("gitlinks:"):
+                self._logger.warning(
+                    "Workspace contains nested git repositories (%s): submissions "
+                    "do not capture their files and the end-of-run restore does "
+                    "not touch them.",
+                    line.removeprefix("gitlinks:").strip(),
+                )
 
     async def submit(self, ref: str, *, auto: bool = False) -> Submission:
         """Pin ``ref`` as the next submission and record the row. Raises
@@ -294,6 +318,86 @@ class Submissions:
         """The ``index`` of the row ``winner_hash`` comes from."""
         winner = self._winner()
         return None if winner is None else winner["index"]
+
+    async def export(
+        self, index: int, commit: str, dest: Path, max_mb: int | None
+    ) -> dict[str, Any]:
+        """Copy submission #``index`` off the sandbox into ``dest`` for a
+        regrade after a sandbox death: ``sub.tar`` (the files it adds or
+        changes against the run's baseline, from the commit) and
+        ``deleted.z``, plus ``manifest.json``. ``dest`` always describes the
+        newest export attempt: a failed one leaves only its manifest
+        (``ok: false``), never an older submission's files. A dead sandbox
+        raises EnvironmentGoneError and leaves ``dest`` as it was."""
+        manifest: dict[str, Any] = {
+            "index": index,
+            "commit": commit,
+            # Where a replay unpacks sub.tar (paths in it are relative to it).
+            "workdir": self._workdir,
+            "ok": False,
+            "started_elapsed_sec": round(self._elapsed_sec(), 1),
+        }
+        partial = dest.with_name(dest.name + ".partial")
+        shutil.rmtree(partial, ignore_errors=True)
+        partial.mkdir(parents=True)
+        started = time.monotonic()
+        sandbox_alive = True
+        try:
+            result = await self._git_exec(
+                utils.read_script("export_submission.sh"),
+                {
+                    "wd": self._workdir,
+                    "commit": commit,
+                    "out_dir": EXPORT_SANDBOX_DIR,
+                    "max_kb": str(int(max_mb) * 1024) if max_mb else "",
+                },
+                EXPORT_TIMEOUT_SEC,
+            )
+            if result.return_code != 0:
+                detail = tools.format_exec_output(result.stdout, result.stderr)
+                manifest["reason"] = tools.truncate_middle(detail, 300)
+                manifest["exit_code"] = result.return_code
+            else:
+                for line in str(result.stdout or "").splitlines():
+                    key, _, value = line.partition("=")
+                    if key in ("bytes", "files", "deleted"):
+                        manifest[key] = int(value) if value.isdigit() else value
+                    elif key == "base":
+                        manifest["base"] = value
+                for name in ("sub.tar", "deleted.z"):
+                    await self._environment.download_file(
+                        f"{EXPORT_SANDBOX_DIR}/{name}", partial / name
+                    )
+                manifest["ok"] = True
+        except Exception as e:
+            try:
+                if isinstance(e, tools.EnvironmentGoneError):
+                    raise
+                tools.raise_if_environment_gone(e)
+            except tools.EnvironmentGoneError:
+                sandbox_alive = False
+                shutil.rmtree(partial, ignore_errors=True)
+                raise
+            manifest["reason"] = f"{type(e).__name__}: {e}"[:300]
+        except BaseException:
+            # Cancelled (the run is ending): no partial copy, no sandbox calls.
+            sandbox_alive = False
+            shutil.rmtree(partial, ignore_errors=True)
+            raise
+        finally:
+            if sandbox_alive:
+                with contextlib.suppress(Exception):
+                    await self._environment.exec(
+                        f"rm -rf {EXPORT_SANDBOX_DIR}", timeout_sec=60, user="root"
+                    )
+        if not manifest["ok"]:
+            for name in ("sub.tar", "deleted.z"):
+                (partial / name).unlink(missing_ok=True)
+        manifest["export_sec"] = self._since(started)
+        (partial / "manifest.json").write_text(json.dumps(manifest, indent=2))
+        shutil.rmtree(dest, ignore_errors=True)
+        partial.replace(dest)
+        return manifest
 
     async def restore_winner(self) -> bool:
         """Restore the winning commit; True once the workspace holds it. A

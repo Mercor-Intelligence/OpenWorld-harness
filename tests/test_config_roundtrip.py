@@ -83,6 +83,10 @@ FIELD_VALUES: dict[str, Any] = {
     "workspace_git_excludes": ["node_modules", "target"],
     "static_git_path": "/opt/rwe-eval/git",
     "large_input_exclude_mb": 100,
+    "large_input_total_mb": 256,
+    "sandbox_limits": {"cpus": 8, "memory_mb": 32768, "gpus": 1, "gpu_type": "H100"},
+    "submission_export": False,
+    "submission_export_max_mb": 512,
     "litellm_model_info": {
         MODEL: {"max_input_tokens": 50000, "supports_vision": True},
         "gpt-test": {"max_input_tokens": 50000, "input_cost_per_token": 1e-06},

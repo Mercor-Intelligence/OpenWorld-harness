@@ -283,7 +283,7 @@ async def test_staging_that_outlasts_its_limit_is_cleaned_up(
         await shimmed(subs, home, tmp_path / "bin").submit("", auto=auto)
     message = str(excinfo.value)
     assert "did not finish within 1s" in message
-    assert "add them to .gitignore" in message
+    assert "add them to .git/info/exclude" in message
     assert "big.bin" in message
     assert not list((repo / ".git").glob("*.lock"))
     assert not list((repo / ".git").glob("proximus-snapshot-index*"))

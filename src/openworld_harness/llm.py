@@ -187,6 +187,39 @@ class ProviderRetryBudgetError(RuntimeError):
     """
 
 
+class ProviderRefusalError(RuntimeError):
+    """The provider refused the request (a policy classifier, not a fault).
+
+    Raised by ``LLM.query`` after ``REFUSAL_ATTEMPTS`` refused attempts in a
+    row. ``code`` is the provider's code (``cyber_policy``, ``invalid_prompt``)
+    or ``content_policy`` for LiteLLM's ContentPolicyViolationError.
+    """
+
+    def __init__(self, code: str, message: str):
+        super().__init__(f"provider refused the request ({code}): {message}")
+        self.code = code
+
+
+# Error codes of provider policy refusals that LiteLLM leaves as a plain
+# BadRequestError. OpenAI's `cyber_policy` ended a 9.96 h lvgl run; its
+# `invalid_prompt` fires nondeterministically, so a replay can pass.
+_REFUSAL_CODES = ("cyber_policy", "invalid_prompt", "content_policy_violation")
+# Refused attempts of one request before ProviderRefusalError.
+REFUSAL_ATTEMPTS = 3
+
+
+def provider_refusal_code(error: BaseException) -> str | None:
+    """The refusal code when ``error`` is a provider policy refusal, else None."""
+    if isinstance(error, litellm.exceptions.ContentPolicyViolationError):
+        return "content_policy"
+    if isinstance(error, litellm.exceptions.BadRequestError):
+        text = _error_text(error)
+        for code in _REFUSAL_CODES:
+            if code in text:
+                return code
+    return None
+
+
 def _error_text(error: BaseException) -> str:
     parts = [
         str(error),
@@ -241,9 +274,10 @@ def is_responses_unknown_item_error(error: BaseException) -> bool:
 
 
 def _is_retryable(error: BaseException) -> bool:
-    """ContentPolicyViolationError is retryable despite subclassing
-    BadRequestError: OpenAI's `invalid_prompt` fires nondeterministically
-    and a verbatim replay usually passes."""
+    """Provider refusals (ContentPolicyViolationError, and the plain
+    BadRequestErrors in ``_REFUSAL_CODES``) are retryable despite subclassing
+    BadRequestError: OpenAI's `invalid_prompt` fires nondeterministically and a
+    verbatim replay usually passes. Their attempts are capped separately."""
     if not isinstance(error, Exception):
         # BaseException-only classes (CancelledError, GeneratorExit,
         # KeyboardInterrupt): cancellation/teardown control flow, never a
@@ -253,7 +287,9 @@ def _is_retryable(error: BaseException) -> bool:
         # CancelledError") until the SIGKILL, skipping auto-submission and
         # the end-of-run restore.
         return False
-    if isinstance(error, litellm.exceptions.ContentPolicyViolationError):
+    if provider_refusal_code(error) is not None:
+        # Replayed up to REFUSAL_ATTEMPTS times (_StopAfterRefusals), then
+        # LLM.query raises ProviderRefusalError for the agent loop.
         return True
     if isinstance(
         error, litellm.exceptions.BadRequestError
@@ -720,6 +756,23 @@ class _StopWhenBudgetSpent(tenacity.stop.stop_base):
         return remaining is not None and remaining <= 0
 
 
+class _StopAfterRefusals(tenacity.stop.stop_base):
+    """Stop once a request was refused REFUSAL_ATTEMPTS times."""
+
+    @override
+    def __call__(self, retry_state: tenacity.RetryCallState) -> bool:
+        outcome = retry_state.outcome
+        error = outcome.exception() if outcome is not None and outcome.failed else None
+        return (
+            error is not None
+            and provider_refusal_code(error) is not None
+            and retry_state.attempt_number >= REFUSAL_ATTEMPTS
+        )
+
+
+ProviderEventHook = Callable[[dict[str, Any]], None]
+
+
 class LLM:
     """One model endpoint. ``remaining_sec`` (None = no budget) caps the
     per-call timeout so a hung request plus retry can't swallow the run."""
@@ -733,12 +786,18 @@ class LLM:
         provider_health_path: Path | None = None,
         *,
         extra_env: dict[str, str] | None = None,
+        on_provider_event: ProviderEventHook | None = None,
     ):
         _install_litellm_reasoning_only_patch()
         self.model_name = model_name
         self._config = config
         self._remaining_sec = remaining_sec
         self._logger = logger
+        # Called once per failed attempt that is retried or ends the query, with
+        # what the trajectory records (see Proximus._record_provider_event).
+        self._on_provider_event = on_provider_event
+        # Wall time of failed provider attempts plus their backoff sleeps.
+        self.provider_lost_sec = 0.0
         self._provider_health = _ProviderHealth(
             provider_health_path, model_name, logger
         )
@@ -831,17 +890,33 @@ class LLM:
         tools: list[dict[str, Any]] | None,
     ) -> ParsedResponse:
         stops: list[tenacity.stop.stop_base] = [
-            _StopWhenBudgetSpent(self._remaining_sec)
+            _StopWhenBudgetSpent(self._remaining_sec),
+            _StopAfterRefusals(),
         ]
         if self._remaining_sec() is None:
             stops.append(tenacity.stop_after_attempt(LLM_RETRIES))
         log_before_sleep = tenacity.before_sleep_log(self._logger, logging.WARNING)
+        attempt_started = time.monotonic()
+
+        async def attempt(
+            messages: list[Message], tools: list[dict[str, Any]] | None
+        ) -> ModelResponse:
+            nonlocal attempt_started
+            attempt_started = time.monotonic()
+            return await self._acompletion(messages, tools)
 
         def before_sleep(retry_state: tenacity.RetryCallState) -> None:
             error = retry_state.outcome.exception() if retry_state.outcome else None
             sleep = retry_state.next_action.sleep if retry_state.next_action else 0.0
             if error is not None:
                 self._provider_health.retrying(error, sleep)
+                self._provider_event(
+                    "retry",
+                    error,
+                    attempt=retry_state.attempt_number,
+                    attempt_sec=time.monotonic() - attempt_started,
+                    sleep_sec=sleep,
+                )
             log_before_sleep(retry_state)
 
         retryer = tenacity.AsyncRetrying(
@@ -859,13 +934,51 @@ class LLM:
             reraise=True,
         )
         try:
-            response = await retryer(self._acompletion, messages, tools)
+            response = await retryer(attempt, messages, tools)
         except BaseException as error:
             if isinstance(error, Exception):
                 self._provider_health.failed(error)
+                if _is_retryable(error):
+                    # The last attempt of a request that never succeeded.
+                    self._provider_event(
+                        "failed", error, attempt_sec=time.monotonic() - attempt_started
+                    )
+                code = provider_refusal_code(error)
+                if code is not None:
+                    raise ProviderRefusalError(code, str(error)[:500]) from error
             raise
         self._provider_health.success()
         return self._parse_response(response)
+
+    def _provider_event(
+        self,
+        kind: str,
+        error: BaseException,
+        *,
+        attempt_sec: float,
+        sleep_sec: float = 0.0,
+        attempt: int | None = None,
+    ) -> None:
+        """Count the lost time and report one failed attempt."""
+        self.provider_lost_sec += max(0.0, attempt_sec) + max(0.0, sleep_sec)
+        if self._on_provider_event is None:
+            return
+        remaining = self._remaining_sec()
+        event: dict[str, Any] = {
+            "kind": kind,
+            "error_type": type(error).__name__,
+            "error_message": _ProviderHealth._safe_message(error)[:300],
+            "attempt_sec": round(attempt_sec, 1),
+            "sleep_sec": round(sleep_sec, 1),
+            "provider_lost_sec": round(self.provider_lost_sec, 1),
+            "remaining_sec": None if remaining is None else round(remaining, 1),
+        }
+        if attempt is not None:
+            event["attempt"] = attempt
+        try:
+            self._on_provider_event(event)
+        except Exception as hook_error:  # noqa: BLE001 — telemetry only
+            self._logger.debug("Provider event hook failed: %s", hook_error)
 
     async def _acompletion(
         self,
@@ -1003,10 +1116,13 @@ class LLM:
         truncated = choice.finish_reason == "length" or self._hit_output_limit(response)
         if truncated:
             content = choice.message.content or ""
-            raise OutputLengthExceededError(
+            error = OutputLengthExceededError(
                 f"Model {self.model_name} hit the max output tokens limit.",
                 truncated_response=content,
             )
+            # The discarded turn was still generated and billed.
+            error.parsed = self._parse_response(response)  # type: ignore[attr-defined]
+            raise error
         return response
 
     @staticmethod

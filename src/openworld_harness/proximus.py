@@ -1,3 +1,4 @@
+import asyncio
 import contextlib
 import itertools
 import json
@@ -27,7 +28,7 @@ import openworld_harness.submissions as submissions
 import openworld_harness.timer as timer
 import openworld_harness.tools as tools
 import openworld_harness.utils as utils
-from openworld_harness.config import ProximusConfig
+from openworld_harness.config import BUDGET_MARGIN_SEC, ProximusConfig
 
 EMPTY_TURN_STALL_LIMIT = 3
 # Fraction of the context window at which proactive compaction runs
@@ -35,6 +36,16 @@ EMPTY_TURN_STALL_LIMIT = 3
 KEEP_RECENT_MESSAGES = 6
 # Byte cap on the PROGRESS.md read folded into each compaction handoff
 PROGRESS_REINJECT_MAX_BYTES = 25_000
+# A budget that runs out while a provider error is being retried ends the run
+# normally (the restored winner is graded) unless provider failures cost more
+# than this fraction of the budget; then the run fails, to be re-run.
+PROVIDER_LOSS_GRADED_FRACTION = 0.10
+# Characters of a discarded over-long response kept in its trajectory step.
+DISCARD_EXCERPT_CHARS = 2000
+# How long the end of the run waits for an in-flight submission export.
+EXPORT_FINALIZE_WAIT_SEC = 300
+# Agent-logs directory of the latest submission export.
+EXPORT_DIR_NAME = "winner"
 
 
 @dataclass
@@ -58,6 +69,12 @@ class RunState:
     fallback_turns: int = 0
     fallback_models: dict[str, int] = field(default_factory=dict)
     n_images: int = 0  # viewed images saved under <logs_dir>/images/
+    # How the run ended: submit, budget, max_turns, stall, provider_failure,
+    # sandbox_death, cancelled (Harbor's agent timeout) or error.
+    ended_by: str | None = None
+    # Set when the provider ended the run early and the winner is still graded.
+    provider_failure: dict[str, Any] | None = None
+    consecutive_refusals: int = 0
 
 
 class Proximus(BaseAgent):
@@ -111,6 +128,7 @@ class Proximus(BaseAgent):
             self.logger,
             provider_health_path=self.logs_dir / "provider_health.json",
             extra_env=self.extra_env,
+            on_provider_event=self._record_provider_event,
         )
         self._context_limit = self._llm.resolve_context_limit()
         self._system_prompt = self.system_prompt()
@@ -118,6 +136,9 @@ class Proximus(BaseAgent):
         self._tool_schemas = [tool.schema() for tool in self._tools.values()]
         self._run = RunState()
         self._steps: list[trajectories.Step] = []
+        # Background copy of the newest submission off the sandbox.
+        self._export_task: asyncio.Task | None = None
+        self._export_pending: tuple[int, str] | None = None
 
     @staticmethod
     @override
@@ -189,7 +210,18 @@ class Proximus(BaseAgent):
 
         try:
             await self._agent_loop()
+        except tools.EnvironmentGoneError:
+            self._run.ended_by = "sandbox_death"
+            raise
+        except asyncio.CancelledError:
+            # Harbor's agent timeout: the live sandbox is graded as-is.
+            self._run.ended_by = self._run.ended_by or "cancelled"
+            raise
+        except BaseException:
+            self._run.ended_by = self._run.ended_by or "error"
+            raise
         finally:
+            await self._finish_exports()
             try:
                 should_finalize = (
                     not self.config.finalize_only_on_submit or self._run.ended_by_submit
@@ -213,6 +245,7 @@ class Proximus(BaseAgent):
                 self._populate_context(context)
                 self._dump_artifacts()
         if self._run.env_lost:
+            self._run.ended_by = "sandbox_death"
             # Reached only when the loop itself ended normally: the sandbox died
             # during the end-of-run submission or restore, so the workspace the
             # verifier would grade is gone too. Fail the trial, as a death
@@ -232,22 +265,31 @@ class Proximus(BaseAgent):
         for turn in itertools.count(1):
             self._run.n_turns = turn
 
-            budget = self.config.time_budget_sec
-            if budget and self._elapsed() >= budget:
+            if self._budget_spent():
                 self.logger.debug("Time budget exhausted; ending run.")
+                self._run.ended_by = "budget"
                 return
             if self.config.max_turns and turn > self.config.max_turns:
                 self.logger.debug("Turn limit reached; ending run.")
                 self._run.n_turns = turn - 1
+                self._run.ended_by = "max_turns"
                 return
 
             tokens = self._run.last_context_tokens
+            remaining = self._remaining_budget_sec()
             if (
                 self.config.enable_summarize
                 and tokens
                 and tokens >= self.config.compaction_threshold * self._context_limit
+                # Too close to the deadline for a summary call and a turn; the
+                # next request still fits (the threshold is below the limit).
+                and (remaining is None or remaining > BUDGET_MARGIN_SEC)
             ):
                 await self._compact()
+                if self._budget_spent():
+                    self.logger.debug("Time budget exhausted during compaction.")
+                    self._run.ended_by = "budget"
+                    return
 
             try:
                 parsed = await self._llm.query(
@@ -259,10 +301,33 @@ class Proximus(BaseAgent):
                 self.logger.debug("Context window exceeded; compacting.")
                 await self._compact()
                 continue
-            except OutputLengthExceededError:
+            except OutputLengthExceededError as e:
                 self.logger.debug("Output length exceeded; asking for smaller output.")
+                self._record_discard(e)
                 self._inject_user(prompts.OUTPUT_LENGTH_MESSAGE, "output_length")
                 continue
+            except llm.ProviderRefusalError as e:
+                self._run.consecutive_refusals += 1
+                if (
+                    self._run.consecutive_refusals == 1
+                    and self._withhold_newest_output()
+                ):
+                    self.logger.warning(
+                        f"Provider refused the request ({e.code}); withheld the "
+                        "newest tool output and retrying."
+                    )
+                    self._inject_user(
+                        prompts.PROVIDER_REFUSAL_MESSAGE, "provider_refusal"
+                    )
+                    continue
+                self.logger.warning(
+                    f"Provider refused the request again ({e.code}); ending the "
+                    "run so the restored winner is graded."
+                )
+                self._end_by_provider(
+                    {"kind": "refusal", "code": e.code, "message": str(e)[:300]}
+                )
+                return
             except llm.ImageLimitExceededError:
                 # Clear all images to avoid repeatedly hitting the image-count cap.
                 evicted = images.evict_all(self._run.messages)
@@ -308,15 +373,29 @@ class Proximus(BaseAgent):
             except Exception as e:
                 budget = self.config.time_budget_sec
                 if budget and self._elapsed() >= budget and llm._is_retryable(e):
-                    # Fail the trial rather than grade partial work after retries expire.
+                    lost = self._llm.provider_lost_sec
+                    if lost <= PROVIDER_LOSS_GRADED_FRACTION * budget:
+                        # A run that lost little to the provider is graded on
+                        # its restored winner, as if the budget ran out.
+                        self.logger.warning(
+                            "Budget expired during provider retries; ending the "
+                            f"run ({lost:.0f}s lost to provider errors)."
+                        )
+                        self._end_by_provider(
+                            {"kind": "retry_budget", "error_type": type(e).__name__}
+                        )
+                        return
+                    # Starved by the provider: fail, so the trial is re-run.
                     self.logger.debug(
                         "Budget expired during provider retries; failing run."
                     )
                     raise llm.ProviderRetryBudgetError(
-                        "Budget expired during provider retries"
+                        "Budget expired during provider retries "
+                        f"({lost:.0f}s lost to provider errors)"
                     ) from e
                 raise
 
+            self._run.consecutive_refusals = 0
             self._accumulate_usage(parsed)
             self._run.messages.extend(self._llm.assistant_messages(parsed))
             stalled = self._model_stalled(parsed)
@@ -330,6 +409,7 @@ class Proximus(BaseAgent):
                         "turns; ending run."
                     )
                     self._run.stalled = True
+                    self._run.ended_by = "stall"
                     return
 
                 if self._run.submit_armed_turn is not None:
@@ -345,6 +425,8 @@ class Proximus(BaseAgent):
             end_run = await self._execute_tool_calls(parsed)
             self._dump_artifacts()
             if end_run:
+                if self._run.ended_by_submit:
+                    self._run.ended_by = "submit"
                 return
 
     def _model_stalled(self, parsed: llm.ParsedResponse) -> bool:
@@ -459,6 +541,7 @@ class Proximus(BaseAgent):
                 env_gone,
             )
             self._run.env_lost = True
+            self._run.ended_by = "sandbox_death"
             end_run = True
 
         if pending_images and not end_run:
@@ -622,6 +705,7 @@ class Proximus(BaseAgent):
                     self.config.time_budget_sec,
                 )
             )
+        self._schedule_export(submission.index, submission.hash)
         # Numbered like list_submissions' rows, failed calls included.
         note = prompts.submission_note(
             submission.index, submission.hash, submission.description
@@ -631,6 +715,62 @@ class Proximus(BaseAgent):
         run.submit_armed_turn = run.n_turns
         guidance = prompts.submit_guidance(self._elapsed(), self.config.time_budget_sec)
         return tools.ToolResult(f"{note} {guidance}")
+
+    # ----- submission export -----
+
+    def _schedule_export(self, index: int, commit: str) -> None:
+        """Export submission #index off the sandbox in the background; while
+        one export runs, only the newest waiting submission follows it."""
+        if not self.config.submission_export or not commit:
+            return
+        self._export_pending = (index, commit)
+        if self._export_task is None or self._export_task.done():
+            self._export_task = asyncio.create_task(self._export_loop())
+
+    async def _export_loop(self) -> None:
+        while self._export_pending is not None:
+            index, commit = self._export_pending
+            self._export_pending = None
+            try:
+                manifest = await self._submissions.export(
+                    index,
+                    commit,
+                    self.logs_dir / EXPORT_DIR_NAME,
+                    self.config.submission_export_max_mb,
+                )
+            except tools.EnvironmentGoneError:
+                return
+            except Exception as e:  # noqa: BLE001 — an export never fails the run
+                self.logger.warning(f"Export of submission #{index} errored: {e}")
+                continue
+            if manifest.get("ok"):
+                self.logger.info(
+                    f"Exported submission #{index}: {manifest.get('files')} file(s), "
+                    f"{manifest.get('bytes')} bytes."
+                )
+            else:
+                self.logger.warning(
+                    f"Submission #{index} not exported: {manifest.get('reason')}"
+                )
+
+    async def _finish_exports(self) -> None:
+        """Let an in-flight export finish (bounded), unless the sandbox is gone
+        or Harbor is cancelling the run (its timeout must not wait on it)."""
+        task = self._export_task
+        if task is None or task.done():
+            return
+        if self._run.env_lost or self._run.ended_by in ("sandbox_death", "cancelled"):
+            # Cancelled exports clean up locally only; give that a moment.
+            task.cancel()
+            await asyncio.wait({task}, timeout=5)
+            return
+        try:
+            await asyncio.wait_for(asyncio.shield(task), EXPORT_FINALIZE_WAIT_SEC)
+        except TimeoutError:
+            self.logger.warning("Submission export did not finish; abandoned.")
+            task.cancel()
+        except Exception as e:  # noqa: BLE001
+            self.logger.warning(f"Submission export failed at the end: {e}")
 
     # ----- context management -----
     # The summary request must look byte-identical to a normal turn (same
@@ -642,12 +782,20 @@ class Proximus(BaseAgent):
         tail verbatim (minus any tool results the cut stranded)."""
         summary = await self._handoff_summary()
         progress = await self._read_progress()
+        recorded = (
+            prompts.submissions_list(
+                self._submissions.summary(), self._submissions.winner_index()
+            )
+            if hasattr(self, "_submissions")
+            else None
+        )
         handoff = prompts.handoff_message(
             self._instruction,
             summary,
             progress,
             self._elapsed(),
             self.config.time_budget_sec,
+            submissions=recorded,
         )
 
         messages = self._run.messages
@@ -817,7 +965,106 @@ class Proximus(BaseAgent):
             return None
         return max(0.0, self.config.time_budget_sec - self._elapsed())
 
-    def _accumulate_usage(self, parsed: llm.ParsedResponse) -> None:
+    def _budget_spent(self) -> bool:
+        budget = self.config.time_budget_sec
+        return bool(budget) and self._elapsed() >= budget
+
+    def _end_by_provider(self, failure: dict[str, Any]) -> None:
+        """End the loop normally after a provider failure: finalize then
+        restores the winner and Harbor grades it."""
+        self._run.provider_failure = {
+            **failure,
+            "at_sec": round(self._elapsed(), 1),
+            "provider_lost_sec": round(self._llm.provider_lost_sec, 1),
+        }
+        self._run.ended_by = "provider_failure"
+        self._add_step(
+            "system",
+            f"Run ended by a provider failure ({failure.get('kind')}); the "
+            "restored winner is graded.",
+            extra={"provider_failure": self._run.provider_failure},
+        )
+        self._dump_artifacts()
+
+    def _record_provider_event(self, event: dict[str, Any]) -> None:
+        """A failed provider attempt, as a system step (the model never sees
+        it): its error, how long it took and the budget left."""
+        if not hasattr(self, "_steps"):
+            return
+        self._add_step(
+            "system",
+            f"Provider call {event.get('kind')}: {event.get('error_type')} after "
+            f"{event.get('attempt_sec')}s; next attempt in {event.get('sleep_sec')}s.",
+            extra={"provider_event": event},
+        )
+        self._dump_artifacts()
+
+    def _record_discard(self, error: OutputLengthExceededError) -> None:
+        """Count a discarded over-long response's usage and log what was
+        discarded (the model is told only that it was)."""
+        parsed = getattr(error, "parsed", None)
+        if isinstance(parsed, llm.ParsedResponse):
+            self._accumulate_usage(parsed, kept=False)
+        text = getattr(error, "truncated_response", None) or ""
+        half = DISCARD_EXCERPT_CHARS // 2
+        excerpt = (
+            text
+            if len(text) <= DISCARD_EXCERPT_CHARS
+            else (
+                f"{text[:half]}\n[... {len(text) - DISCARD_EXCERPT_CHARS} chars ...]\n"
+                f"{text[-half:]}"
+            )
+        )
+        self._add_step(
+            "system",
+            "Response discarded: it hit the maximum output length.",
+            extra={
+                "discarded_output": {
+                    "chars": len(text),
+                    "completion_tokens": getattr(parsed, "completion_tokens", None),
+                    "cost_usd": getattr(parsed, "cost_usd", None),
+                    "excerpt": excerpt,
+                }
+            },
+        )
+
+    def _withhold_newest_output(self) -> bool:
+        """Replace the newest turn's tool results with a note, after a provider
+        refusal (the latest output most likely tripped its classifier). False
+        when there is nothing to withhold."""
+        messages = self._run.messages
+        last_call = next(
+            (
+                i
+                for i in range(len(messages) - 1, -1, -1)
+                if messages[i].get("role") == "assistant"
+                and messages[i].get("tool_calls")
+            ),
+            None,
+        )
+        if last_call is None:
+            return False
+        withheld = 0
+        for message in messages[last_call + 1 :]:
+            if (
+                message.get("role") == "tool"
+                and message.get("content") != prompts.WITHHELD_OUTPUT
+            ):
+                message["content"] = prompts.WITHHELD_OUTPUT
+                withheld += 1
+        if withheld:
+            self._add_step(
+                "system",
+                f"Withheld {withheld} tool output(s) after a provider refusal.",
+                extra={"withheld_outputs": withheld},
+            )
+        return withheld > 0
+
+    def _accumulate_usage(
+        self, parsed: llm.ParsedResponse, *, kept: bool = True
+    ) -> None:
+        """Add a response's tokens and cost. ``kept=False`` for a discarded
+        response: billed, but its completion is not in the context."""
         run = self._run
         run.total_prompt_tokens += parsed.prompt_tokens
         run.total_completion_tokens += parsed.completion_tokens
@@ -830,8 +1077,8 @@ class Proximus(BaseAgent):
             model = parsed.response_model or "unknown"
             run.fallback_models[model] = run.fallback_models.get(model, 0) + 1
         if parsed.prompt_tokens:
-            self._run.last_context_tokens = (
-                parsed.prompt_tokens + parsed.completion_tokens
+            self._run.last_context_tokens = parsed.prompt_tokens + (
+                parsed.completion_tokens if kept else 0
             )
 
     def _populate_context(self, context: AgentContext) -> None:
@@ -849,6 +1096,9 @@ class Proximus(BaseAgent):
             # The commit grading checks out; None = score the workspace as-is.
             "submitted_commit": self._submissions.winner_hash() if has_store else None,
             "ended_by_submit": run.ended_by_submit,
+            "ended_by": run.ended_by,
+            "provider_failure": run.provider_failure,
+            "provider_lost_sec": round(self._llm.provider_lost_sec, 1),
             "env_lost": run.env_lost,  # cut short by a dead sandbox
             "stalled": run.stalled,  # ended by the empty-turn breaker
             "fallback_attempted_turns": run.fallback_attempted_turns,
