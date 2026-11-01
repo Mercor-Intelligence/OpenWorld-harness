@@ -362,6 +362,56 @@ async def test_the_newest_recorded_submission_is_exported(tmp_path, monkeypatch)
     assert manifest["index"] == 2 and env.exports[-1] == manifest["commit"]
     assert (winner / "sub.tar").read_text() == "copy of /tmp/proximus/export/sub.tar"
     assert not (tmp_path / "logs" / "winner.partial").exists()
+    assert not any(
+        "could NOT be saved" in str(m["content"]) for m in read_messages(agent)
+    )
+
+
+async def test_a_failed_export_is_told_to_the_model_once(tmp_path, monkeypatch):
+    fake = FakeCompletion(
+        [
+            submit_response(),
+            bash_response("echo one"),
+            bash_response("echo two"),
+            *finish_responses(),
+        ]
+    )
+    monkeypatch.setattr(litellm, "acompletion", fake)
+    agent = make_agent(tmp_path, submission_export=True)
+
+    class TooLargeEnv(ExportingEnv):
+        async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
+            if "diff-tree -r --no-renames --diff-filter=d" in command:
+                self.exports.append((env or {}).get("commit", ""))
+                return ExecResult(
+                    stdout="",
+                    stderr="changed files total 4928307 KB, over the 4194304 KB "
+                    "export limit",
+                    return_code=5,
+                )
+            if "echo one" in command:
+                await asyncio.sleep(0.2)  # the background export finishes first
+            return await super().exec(command, cwd, env, timeout_sec, user)
+
+    env = TooLargeEnv()
+    await agent.run("Task", env, AgentContext())  # type: ignore[arg-type]
+    results = [m["content"] for m in read_messages(agent) if m["role"] == "tool"]
+    one, two = results[1], results[2]  # after submit #1
+    assert "Note: submission #1 is recorded and will be graded normally" in one
+    assert "could NOT be saved off the sandbox" in one
+    assert "(changed files total 4928307 KB, over the 4194304 KB export limit)" in one
+    assert "commit only your deliverables first" in one
+    assert "could NOT be saved" not in two
+
+
+def test_export_note_without_a_size_problem_gives_no_size_advice():
+    note = prompts.export_failed_note(3, "TimeoutError:\n  export took too long")
+    assert note.startswith("(Note: submission #3 is recorded")
+    assert "(TimeoutError: export took too long)" in note
+    assert "deliverables" not in note
+    assert "you will be told if a submission could not be saved" in (
+        prompts.SUBMIT_CONTINUE_OR_CONFIRM
+    )
 
 
 async def test_a_dead_sandbox_does_not_wait_for_an_export(tmp_path, monkeypatch):

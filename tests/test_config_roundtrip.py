@@ -85,6 +85,9 @@ FIELD_VALUES: dict[str, Any] = {
     "large_input_exclude_mb": 100,
     "large_input_total_mb": 256,
     "sandbox_limits": {"cpus": 8, "memory_mb": 32768, "gpus": 1, "gpu_type": "H100"},
+    "memory_watchdog": False,
+    "memory_watchdog_fraction": 0.8,
+    "memory_watchdog_source": "cgroup2",
     "submission_export": False,
     "submission_export_max_mb": 512,
     "litellm_model_info": {
@@ -92,6 +95,7 @@ FIELD_VALUES: dict[str, Any] = {
         "gpt-test": {"max_input_tokens": 50000, "input_cost_per_token": 1e-06},
     },
     "llm_call_kwargs": {"timeout": 5, "extra_body": {"a": 1}},
+    "stream_idle_timeout_sec": 300.0,
     "max_turns": 7,
     "enable_summarize": False,
     "compaction_threshold": 0.5,

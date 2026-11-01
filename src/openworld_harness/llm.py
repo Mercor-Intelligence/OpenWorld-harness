@@ -1,5 +1,7 @@
 """LiteLLM configuration and transport."""
 
+import asyncio
+import contextlib
 import copy
 import itertools
 import json
@@ -185,6 +187,17 @@ class ProviderRetryBudgetError(RuntimeError):
     finished the turn, so Harbor must record an exception rather than
     pin a partial workspace as ``done``.
     """
+
+
+class StreamIncompleteError(RuntimeError):
+    """A streamed response ended without a finish reason: the connection was
+    cut mid-output. LiteLLM would otherwise report finish_reason "stop" and
+    accept a partial turn (half a tool call). Retried like any provider fault."""
+
+
+class StreamStalledError(RuntimeError):
+    """A streamed response sent no chunk for ``stream_idle_timeout_sec``, or
+    was still open when the attempt's time ran out. Retried."""
 
 
 class ProviderRefusalError(RuntimeError):
@@ -975,6 +988,9 @@ class LLM:
         }
         if attempt is not None:
             event["attempt"] = attempt
+        stream_stats = getattr(error, "stream_stats", None)
+        if isinstance(stream_stats, dict):
+            event["stream"] = stream_stats
         try:
             self._on_provider_event(event)
         except Exception as hook_error:  # noqa: BLE001 — telemetry only
@@ -1053,6 +1069,13 @@ class LLM:
                 "budget_tokens": self._config.max_thinking_tokens,
             }
         completion_kwargs.update(self._config.llm_call_kwargs)
+        if (
+            completion_kwargs.get("stream")
+            and "stream_options" not in completion_kwargs
+        ):
+            # Without it LiteLLM keeps the usage chunk to itself and the
+            # rebuilt response estimates usage (no cached/reasoning tokens).
+            completion_kwargs["stream_options"] = {"include_usage": True}
         fallback_handler: _AnthropicFallbackHTTPHandler | None = None
         server_fallback = completion_kwargs.pop("anthropic_fallbacks", None)
         if server_fallback is not None:
@@ -1069,7 +1092,20 @@ class LLM:
                 # Rebuild the ordinary ModelResponse so all downstream parsing
                 # (reasoning blocks, partial tool JSON, usage/cache telemetry,
                 # finish reasons, and cost) follows the same path as before.
-                chunks = [chunk async for chunk in raw_response]
+                requested = completion_kwargs.get("timeout")
+                chunks = await self._collect_stream(
+                    raw_response,
+                    # llm_call_kwargs may set an httpx.Timeout or a dict:
+                    # then the harness's own bound applies to the stream.
+                    total_sec=(
+                        float(requested)
+                        if isinstance(requested, int | float)
+                        and not isinstance(requested, bool)
+                        and requested > 0
+                        else timeout
+                    ),
+                    idle_sec=self._config.stream_idle_timeout_sec,
+                )
                 built = litellm.stream_chunk_builder(chunks, messages=messages)
                 if built is None:
                     raise RuntimeError(
@@ -1124,6 +1160,76 @@ class LLM:
             error.parsed = self._parse_response(response)  # type: ignore[attr-defined]
             raise error
         return response
+
+    @staticmethod
+    async def _collect_stream(
+        raw: Any, *, total_sec: float, idle_sec: float | None
+    ) -> list[Any]:
+        """Read a LiteLLM stream to the end. The request timeout bounds only
+        each socket read of a stream, so ``total_sec`` bounds the whole
+        attempt here, and ``idle_sec`` (if set) the gap between chunks. A
+        stream that ends without a finish reason was cut off mid-output."""
+        started = last = time.monotonic()
+        max_gap = 0.0
+        chunks: list[Any] = []
+        iterator = raw.__aiter__()
+
+        def stats() -> dict[str, Any]:
+            return {
+                "chunks": len(chunks),
+                "stream_sec": round(time.monotonic() - started, 1),
+                "max_gap_sec": round(max_gap, 1),
+            }
+
+        try:
+            while True:
+                left = total_sec - (time.monotonic() - started)
+                wait = left if idle_sec is None else min(idle_sec, left)
+                idle = wait < left
+                if left <= 0:
+                    error = StreamStalledError(
+                        f"stream still open after {total_sec:g}s ({len(chunks)} chunks)"
+                    )
+                    error.stream_stats = stats()  # type: ignore[attr-defined]
+                    raise error
+                deadline = asyncio.timeout(wait)
+                try:
+                    async with deadline:
+                        chunk = await iterator.__anext__()
+                except StopAsyncIteration:
+                    break
+                except TimeoutError as e:
+                    if not deadline.expired():
+                        raise  # the transport's own timeout, not ours
+                    what = (
+                        f"no stream chunk for {wait:g}s"
+                        if idle
+                        else f"stream still open after {total_sec:g}s"
+                    )
+                    error = StreamStalledError(f"{what} ({len(chunks)} chunks)")
+                    error.stream_stats = stats()  # type: ignore[attr-defined]
+                    raise error from e
+                now = time.monotonic()
+                max_gap = max(max_gap, now - last)
+                last = now
+                chunks.append(chunk)
+        finally:
+            close = getattr(raw, "aclose", None)
+            if close is not None:
+                with contextlib.suppress(Exception):
+                    await close()
+        missing = object()
+        received = getattr(raw, "received_finish_reason", missing)
+        if received is not missing and not (
+            received or getattr(raw, "intermittent_finish_reason", None)
+        ):
+            error = StreamIncompleteError(
+                f"the stream ended without a finish reason after {len(chunks)} "
+                "chunks (cut off mid-output)"
+            )
+            error.stream_stats = stats()  # type: ignore[attr-defined]
+            raise error
+        return chunks
 
     @staticmethod
     def _hit_output_limit(response: ModelResponse) -> bool:
@@ -1267,21 +1373,31 @@ class LLM:
             )
         return parsed
 
-    @staticmethod
-    def _extract_cost(response: ModelResponse) -> float:
+    def _extract_cost(self, response: ModelResponse) -> float:
         # litellm prices every acompletion response into
         # _hidden_params["response_cost"] (None for unpriced models). Stream
         # aggregation rebuilds usage but does not retain that hidden field, so
-        # price the rebuilt response from its registered model metadata.
+        # price the rebuilt response from its registered model metadata: the
+        # chunks' own model name first, then the run's model (a gateway's
+        # chunks name the upstream model, e.g. zai/glm-5.3, which only the
+        # run's registered entry prices).
         hidden_params = getattr(response, "_hidden_params", None)
         if isinstance(hidden_params, dict):
             hidden_cost = hidden_params.get("response_cost")
             if hidden_cost is not None:
                 return float(hidden_cost)
-        try:
-            return float(litellm.completion_cost(completion_response=response) or 0.0)
-        except Exception:  # noqa: BLE001 — telemetry must not fail a model turn
-            return 0.0
+        for model in (None, self.model_name):
+            try:
+                kwargs = {} if model is None else {"model": model}
+                cost = float(
+                    litellm.completion_cost(completion_response=response, **kwargs)
+                    or 0.0
+                )
+            except Exception:  # noqa: BLE001 — telemetry must not fail a turn
+                continue
+            if cost > 0:
+                return cost
+        return 0.0
 
     def assistant_messages(self, parsed: ParsedResponse) -> list[Message]:
         """The turn as one or two messages, ready to append to history.

@@ -47,6 +47,24 @@ this harness keeps; the model-facing prompts still call the agent Proximus.
 - The compaction request reads as a routine checkpoint instead of opening with
   "Pause the task.", which some summaries passed on as a user pause.
 - LiteLLM is locked to 1.106.2, with the `mcp` extra its Responses path imports.
+- A bash command that times out is killed with every process it started. Each
+  command runs in its own session (`setsid`), and on a timeout the harness kills
+  that whole session from `/proc`, background jobs and `timeout N ...` wrappers
+  included. Upstream only reported the command as killed; the backend stopped its
+  top process and the rest kept running. `result.json` counts timeouts, killed
+  processes and survivors (`bash_timeouts`, `bash_timeout_killed`,
+  `bash_timeout_survivors`).
+- `sandbox_limits.memory_mb` is enforced (`memory_watchdog`, on by default). Modal
+  takes the memory size as a request, not a limit, so a run that goes far over it
+  is killed along with the whole sandbox. A root loop in the sandbox
+  (`scripts/memwatch.sh`) checks memory use once a second (cgroup v2 or v1, or
+  `/proc/meminfo` under gVisor). Above `memory_watchdog_fraction` (0.92) of the
+  limit, it kills the process with the largest resident set, and the model is told
+  in its next bash result. The loop is restarted if a command kills it and stopped
+  before grading. `result.json` has `memory_watchdog` (source, kills, events).
+- Streamed model calls (`llm_call_kwargs.stream`) request usage, retry a stream
+  cut off without a finish reason, and are bounded as a whole by the request
+  timeout (see [Options](#options-and-customization)).
 
 ## Install and run
 
@@ -106,6 +124,16 @@ and `disallowed_tools` (`list_submissions`, `view_image`). Unset options keep th
 default behavior, and `llm_call_kwargs` wins over the other request settings.
 `max_thinking_tokens` and `reasoning_effort` are mutually exclusive, and
 `max_turns` counts every loop iteration, including recovery retries.
+
+`llm_call_kwargs={"stream": true}` streams each model call, which keeps long
+turns alive at gateways that cut silent requests (Vercel's AI Gateway cuts a
+non-streamed call after ~340 s; add `extra_headers:
+{"x-vercel-gateway-extended-time": "true"}` for streams past ~785 s). Usage is
+requested with `stream_options.include_usage` unless you set it, a stream that
+ends without a finish reason is retried rather than accepted, and the request
+`timeout` bounds the whole stream. `stream_idle_timeout_sec` also retries a
+stream that sends nothing for that long; leave it unset for providers that stay
+silent while reasoning.
 
 For deeper changes, subclass the agent and select it with
 `--agent mypkg.module:MyProximus`:

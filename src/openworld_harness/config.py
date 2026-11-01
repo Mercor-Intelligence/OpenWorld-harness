@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Any, Self
+from typing import Any, Literal, Self
 
 from harbor.agents.options import AgentOptions
 from harbor.utils.templating import render_prompt_template
@@ -84,7 +84,14 @@ class ProximusConfig(AgentOptions):
 
     llm_call_kwargs: dict[str, Any] = Field(default_factory=dict)
     """Extra arguments for every model request (for example ``max_tokens``,
-    ``timeout`` or ``extra_body``). They override all other request settings."""
+    ``timeout`` or ``extra_body``). They override all other request settings.
+    With ``stream: true`` the response is streamed and rebuilt; usage is
+    requested (``stream_options.include_usage``) unless set here."""
+
+    stream_idle_timeout_sec: float | None = Field(default=None, gt=0)
+    """With a streamed request, give up on an attempt (and retry it) when no
+    chunk arrives for this long. Leave unset for providers that stay silent
+    while they reason (OpenAI Responses sends nothing for minutes)."""
 
     max_turns: int | None = Field(default=None, ge=1)
     """Maximum number of loop iterations, including retries. Reaching it ends
@@ -185,6 +192,23 @@ class OpenWorldConfig(ProximusConfig):
         if gpu_type is not None and not isinstance(gpu_type, str):
             raise ValueError("sandbox_limits.gpu_type must be a string")
         return {k: v for k, v in value.items() if v is not None}
+
+    memory_watchdog: bool = True
+    """With ``sandbox_limits.memory_mb``, enforce it: a root loop in the sandbox
+    kills the process with the largest resident set when the sandbox's memory
+    use passes ``memory_watchdog_fraction`` of the limit, and the model is told.
+    Modal treats the limit as a request only, so without this a run that goes
+    over it is killed with the whole sandbox by host pressure. The loop is
+    stopped before grading."""
+
+    memory_watchdog_fraction: float = Field(default=0.92, gt=0, le=1)
+    """Share of ``memory_mb`` at which the watchdog kills."""
+
+    memory_watchdog_source: Literal["auto", "cgroup2", "cgroup1", "meminfo"] = "auto"
+    """How the watchdog measures memory use: cgroup v2 ``memory.current`` or v1
+    ``memory.usage_in_bytes`` (both less inactive page cache), or ``MemTotal -
+    MemAvailable`` (only under gVisor, where /proc/meminfo is the sandbox's).
+    ``auto`` takes the first readable one; with none the watchdog stays off."""
 
     web_snapshot_as_of: str | None = None
     """Turns on ``web_search`` and ``web_fetch`` over Exa Snapshot, pinned to

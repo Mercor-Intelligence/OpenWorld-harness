@@ -25,6 +25,7 @@ from openworld_harness.tools import (
     ViewImageArgs,
     args_for_trajectory,
     exec_result_shows_environment_gone,
+    parse_kill_session,
     raise_if_environment_gone,
     truncate_middle,
 )
@@ -812,3 +813,117 @@ class TestConsecutiveExecFailures:
         # sandbox, so the count never builds up.
         for _ in range(4 * MAX_CONSECUTIVE_EXEC_FAILURES):
             assert (await self.call(executor)).is_error
+
+
+class KillingEnv:
+    """The model's wrapped command times out (in the given way); the root
+    kill_session exec answers with canned output (or raises)."""
+
+    def __init__(self, timeout_kind="raise", killer_stdout="", killer_error=None):
+        self.calls: list[dict] = []
+        self.timeout_kind = timeout_kind
+        self.killer_stdout = killer_stdout
+        self.killer_error = killer_error
+
+    async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
+        self.calls.append(
+            {"command": command, "user": user, "timeout_sec": timeout_sec}
+        )
+        if "proximus-fg" in command or self.timeout_kind == "plain":
+            if self.timeout_kind == "docker":
+                raise RuntimeError(f"Command timed out after {timeout_sec} seconds")
+            if self.timeout_kind == "early-dash-one":
+                return ExecResult(stdout="boom", stderr=None, return_code=-1)
+            raise TimeoutError()
+        if self.killer_error is not None:
+            raise self.killer_error
+        return ExecResult(stdout=self.killer_stdout, stderr=None, return_code=0)
+
+
+class TestTimeoutCleanup:
+    def executor(self, env, sessions=True):
+        return ToolExecutor(env, foreground_sessions=sessions)  # type: ignore[arg-type]
+
+    async def test_timeout_kills_the_session_as_root(self):
+        env = KillingEnv(killer_stdout="sid=42\nkilled=3\nrc=\n")
+        executor = self.executor(env)
+        result = await executor.bash(BashArgs(command="make -j8", timeout_sec=60))
+        assert result.is_error and result.exit_code is None
+        assert "timed out after 60s" in result.content
+        assert "every process it started (3 in all)" in result.content
+        wrapped, killer = env.calls
+        assert 'PROXIMUS_FG_CMD="make -j8"' in wrapped["command"]
+        token = wrapped["command"].split()[-1]
+        assert killer["user"] == "root"
+        assert f"token={token};" in killer["command"]
+        assert (executor.n_timeouts, executor.n_timeout_killed) == (1, 3)
+
+    async def test_survivors_are_listed(self):
+        env = KillingEnv(killer_stdout="sid=42\nkilled=2\nrc=\nsurvivor=77 D python3\n")
+        executor = self.executor(env)
+        result = await executor.bash(BashArgs(command="train", timeout_sec=60))
+        assert "still running: 77 D python3" in result.content
+        assert executor.n_timeout_survivors == 1
+
+    async def test_finished_command_with_background_output_holder(self):
+        env = KillingEnv(killer_stdout="sid=42\nkilled=1\nrc=0\n")
+        result = await self.executor(env).bash(
+            BashArgs(command="server &", timeout_sec=60)
+        )
+        assert "had finished (exit 0)" in result.content
+        assert "nohup cmd > /tmp/cmd.log 2>&1 &" in result.content
+
+    async def test_nothing_left_to_kill_is_not_reported_as_a_kill(self):
+        # E.g. a backend that kills the whole exec tree itself.
+        env = KillingEnv(killer_stdout="sid=42\nkilled=0\nrc=\n")
+        result = await self.executor(env).bash(BashArgs(command="x", timeout_sec=60))
+        assert "and was stopped; nothing it started is still running" in result.content
+        assert "in all" not in result.content
+
+    async def test_command_that_finished_at_the_deadline(self):
+        env = KillingEnv(killer_stdout="sid=42\nkilled=0\nrc=124\n")
+        result = await self.executor(env).bash(BashArgs(command="x", timeout_sec=60))
+        assert "finished (exit 124) just as the timeout hit" in result.content
+        assert "kept its output open" not in result.content
+
+    async def test_killer_failure_is_not_reported_as_a_kill(self):
+        env = KillingEnv(killer_error=ConnectionResetError("blip"))
+        result = await self.executor(env).bash(BashArgs(command="x", timeout_sec=60))
+        assert "may still be running" in result.content
+        assert "every process" not in result.content
+
+    async def test_killer_on_a_dead_sandbox_raises_env_gone(self):
+        env = KillingEnv(
+            killer_error=_provider_error("SandboxTerminatedError", "modal.exception")
+        )
+        with pytest.raises(EnvironmentGoneError):
+            await self.executor(env).bash(BashArgs(command="x", timeout_sec=60))
+
+    async def test_docker_timeout_runtime_error_is_a_timeout(self):
+        env = KillingEnv(timeout_kind="docker", killer_stdout="sid=9\nkilled=1\nrc=\n")
+        executor = self.executor(env)
+        result = await executor.bash(BashArgs(command="x", timeout_sec=60))
+        assert "timed out after 60s" in result.content
+        assert executor._exec_failures == 0
+
+    async def test_early_dash_one_is_not_a_timeout(self):
+        env = KillingEnv(timeout_kind="early-dash-one")
+        result = await self.executor(env).bash(BashArgs(command="x", timeout_sec=60))
+        assert result.content.startswith("exit code: -1")
+        assert len(env.calls) == 1  # no killer
+
+    async def test_without_sessions_nothing_is_wrapped_or_killed(self):
+        env = KillingEnv(timeout_kind="plain")
+        result = await self.executor(env, sessions=False).bash(
+            BashArgs(command="sleep 999", timeout_sec=60)
+        )
+        assert env.calls[0]["command"] == "sleep 999"
+        assert len(env.calls) == 1
+        assert "may still be running" in result.content
+
+    def test_parse_kill_session(self):
+        cleanup = parse_kill_session("sid=none\nkilled=0\nrc=\n")
+        assert cleanup.sid is None and cleanup.killed == 0 and cleanup.rc is None
+        cleanup = parse_kill_session("sid=5\nkilled=4\nrc=137\nsurvivor=9 R sh\n")
+        assert (cleanup.sid, cleanup.killed, cleanup.rc) == ("5", 4, "137")
+        assert cleanup.survivors == ["9 R sh"]

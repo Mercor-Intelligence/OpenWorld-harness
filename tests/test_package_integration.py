@@ -82,6 +82,8 @@ def test_all_shell_and_prompt_resources_present():
         "matches_winner.sh",
         "restore_winner.sh",
         "reanchor_timer.sh",
+        "kill_session.sh",
+        "memwatch.sh",
     ]:
         assert utils.read_script(name).strip()
 

@@ -271,6 +271,7 @@ async def test_run_reports_platform_git_even_when_the_run_fails(
         "n_turns": 3,
         "platform_git": "installed",
         "platform_git_excludes": 2,
+        "memory_watchdog": None,
     }
 
 

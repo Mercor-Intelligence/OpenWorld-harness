@@ -36,13 +36,38 @@ SUBMIT_CONTINUE_OR_CONFIRM = (
     "You can continue working and submit again later to record an improved "
     "result — later work never overwrites a recorded submission, and if the "
     "sandbox itself dies (for example by running out of memory), the run ends "
-    "and your latest recorded submission is graded. If you are "
+    "and your latest recorded submission is graded (you will be told if a "
+    "submission could not be saved for that). If you are "
     "certain nothing more can be gained, call submit again as your ONLY "
     "action in your next message to confirm this as your final submission "
     "and end the run; any other tool call cancels the pending confirmation."
 )
 
 SUBMIT_CONFIRMED = "Final submission confirmed. Ending the session."
+
+
+def export_failed_note(index: int, reason: str, *, too_large: bool = False) -> str:
+    """Appended to the next tool result when submission #index could not be
+    copied off the sandbox (so a sandbox death would lose it)."""
+    for marker in ("[stderr]", "[stdout]"):
+        reason = reason.replace(marker, " ")
+    reason = " ".join(reason.split())
+    if len(reason) > 200:
+        reason = reason[:197] + "..."
+    note = (
+        f"(Note: submission #{index} is recorded and will be graded normally, "
+        "but it could NOT be saved off the sandbox for a regrade "
+        f"({reason}). If the sandbox dies, that submission is lost."
+    )
+    if too_large:
+        note += (
+            " A submit without your own commit snapshots every changed file "
+            "under the workspace, scratch files included: commit only your "
+            "deliverables first (keep scratch data in .gitignore or outside the "
+            "workspace), then submit again."
+        )
+    return note + ")"
+
 
 SUBMIT_FALLBACK = (
     "The final workspace state at the end of the run will be used as your "

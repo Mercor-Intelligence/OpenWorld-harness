@@ -1,7 +1,9 @@
 import json
 import re
+import shlex
 import tempfile
 import time
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -11,6 +13,7 @@ from harbor.environments.base import BaseEnvironment
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 import openworld_harness.images as images
+from openworld_harness import utils
 from openworld_harness.config import BUDGET_MARGIN_SEC
 
 
@@ -111,6 +114,7 @@ def raise_if_environment_gone(error: Exception) -> None:
 # sandbox is gone or only those commands were refused.
 MAX_CONSECUTIVE_EXEC_FAILURES = 5
 LIVENESS_PROBE_TIMEOUT_SEC = 60
+KILL_SESSION_TIMEOUT_SEC = 60
 
 # Fixed executor limits. Command timeouts are additionally capped at the
 # remaining time budget minus BUDGET_MARGIN_SEC, so the loop regains control
@@ -137,6 +141,8 @@ class ToolResult:
     image: images.Attachment | None = None
     # Set only by a confirmed final submission.
     ends_run: bool = False
+    # The bash command's own exit code; None for timeouts and other tools.
+    exit_code: int | None = None
 
 
 BASH_DESCRIPTION = (
@@ -153,7 +159,8 @@ BASH_DESCRIPTION = (
     "file and append ` &` (e.g. `nohup ./run.sh > /tmp/run.log "
     "2>&1 &`), checkpoint best-so-far results to a file, then "
     "poll the log with later calls. A foreground command that "
-    "hits the timeout is killed and its work lost."
+    "hits the timeout is killed, together with every process it "
+    "started (background jobs included), and its work is lost."
 )
 
 VIEW_IMAGE_DESCRIPTION = (
@@ -310,6 +317,108 @@ def format_exec_output(stdout: str | None, stderr: str | None) -> str:
     return truncate_middle(body, OUTPUT_LIMIT_CHARS) if body else "(no output)"
 
 
+# ----- foreground command sessions -----
+#
+# A backend exec timeout kills only the exec's top process (Modal and Harbor's
+# Docker exec alike), so a timed-out command's children, `timeout N ...`
+# wrappers and background jobs kept running while the model was told the
+# command "was killed". Each bash call therefore runs in its own session: the
+# wrapper records the session id, and on a timeout kill_session.sh (as root)
+# kills every process in that session. Sessions survive setpgid, which
+# `timeout` and job control use, so those are found too.
+
+FG_DIR = "/tmp/proximus/fg"
+_FG_ENV = "PROXIMUS_FG_CMD"
+
+
+# Runs as `bash --posix -c SUPERVISOR proximus-fg TOKEN PREVIOUS`. The model's
+# command travels in $PROXIMUS_FG_CMD (an env var, so the wrapper never shows
+# it in an argv that `pkill -f` might match). setsid is not the last command,
+# so bash runs it as a child that is no group leader: setsid then makes the
+# session without forking, and a signal death still reads as 128+n (-w only
+# matters if setsid ever has to fork: the call must still wait for it). The
+# supervisor's own diagnostics (mkdir, bash's "Killed" notices) go to
+# /dev/null; the session's shell gets the exec's stderr back from fd 3 and
+# closes fd 3, so a background job that redirects its output holds no copy
+# of the exec's pipes (the call would otherwise wait for it). stdin is
+# /dev/null: an accidental read must not block until the timeout.
+def _fg_supervisor(fg_dir: str) -> str:
+    return (
+        f"D={fg_dir}\n"
+        '[ -d "$D" ] || mkdir -p "$D" 2>/dev/null\n'
+        '[ -n "$2" ] && rm -f "$D/$2.sid" "$D/$2.rc" 2>/dev/null\n'
+        "{ setsid -w sh -c "
+        '\'{ echo $$ >"$1"; } 2>/dev/null; c=$' + _FG_ENV + "; unset " + _FG_ENV + "; "
+        'exec 2>&3 3>&-; exec bash -c "$c"\' fg "$D/$1.sid" </dev/null; } 3>&2 2>/dev/null\n'
+        "rc=$?\n"
+        '{ echo "$rc" >"$D/$1.rc"; } 2>/dev/null\n'
+        'exit "$rc"'
+    )
+
+
+def _double_quote(text: str) -> str:
+    """Quote for a POSIX shell inside double quotes. Unlike shlex.quote, a
+    single quote costs nothing here; the backend's own quoting of the whole
+    command (su -c '...') would otherwise grow each one about 25-fold."""
+    return '"' + re.sub(r'([\\"$`])', r"\\\1", text) + '"'
+
+
+def foreground_command(
+    command: str, token: str, previous: str | None, fg_dir: str = FG_DIR
+) -> str:
+    """The exec string that runs ``command`` in its own session (see
+    _fg_supervisor), recording the session id under ``token`` and dropping
+    ``previous``'s leftover files."""
+    return (
+        f"{_FG_ENV}={_double_quote(command)} exec bash --posix -c "
+        f"{shlex.quote(_fg_supervisor(fg_dir))} proximus-fg {token} {previous or ''}"
+    ).rstrip()
+
+
+# Prints fg-sessions-ok when setsid exists and a process it starts leads its
+# own session (stat field 6 == its pid), i.e. when the timeout kill can work.
+FG_SESSION_PROBE = (
+    f"mkdir -p {FG_DIR} 2>/dev/null; "
+    "setsid -w sh -c 'read -r l </proc/$$/stat && r=${l##*) } && set -- $r && "
+    '[ "$4" = "$$" ] && echo fg-sessions-ok\' </dev/null 2>/dev/null; true'
+)
+
+
+@dataclass
+class TimeoutCleanup:
+    """What kill_session.sh found after a timeout."""
+
+    attempted: bool = False
+    sid: str | None = None
+    killed: int = 0
+    rc: str | None = None
+    survivors: list[str] | None = None
+    error: str | None = None
+
+
+def parse_kill_session(stdout: str) -> TimeoutCleanup:
+    cleanup = TimeoutCleanup(attempted=True, survivors=[])
+    for line in (stdout or "").splitlines():
+        key, _, value = line.strip().partition("=")
+        if key == "sid":
+            cleanup.sid = None if value == "none" else value
+        elif key == "killed" and value.isdigit():
+            cleanup.killed = int(value)
+        elif key == "rc":
+            cleanup.rc = value or None
+        elif key == "survivor" and value:
+            assert cleanup.survivors is not None
+            cleanup.survivors.append(value)
+    return cleanup
+
+
+def _is_backend_timeout(error: Exception) -> bool:
+    """Harbor's Docker exec reports a command timeout as this RuntimeError."""
+    return isinstance(error, RuntimeError) and str(error).startswith(
+        "Command timed out after"
+    )
+
+
 class ToolExecutor:
     """Executes bash and view_image calls against a task environment."""
 
@@ -319,8 +428,18 @@ class ToolExecutor:
         *,
         default_workdir: str | None = None,
         remaining_sec: Callable[[], float | None] | None = None,
+        foreground_sessions: bool = False,
+        fg_dir: str = FG_DIR,
     ):
         self._environment = environment
+        # Whether bash calls run in their own session (see FG_SESSION_PROBE).
+        self._foreground_sessions = foreground_sessions
+        self._fg_dir = fg_dir
+        self._previous_token: str | None = None
+        # Telemetry for the run's metadata.
+        self.n_timeouts = 0
+        self.n_timeout_killed = 0
+        self.n_timeout_survivors = 0
         # Caps command timeouts so a foreground command can't outlive the
         # time budget — the loop must regain control before the hard kill.
         self._remaining_sec = remaining_sec
@@ -339,10 +458,17 @@ class ToolExecutor:
                 is_error=True,
             )
         timeout = self._clamp_timeout(args.timeout_sec)
+        command, token = args.command, None
+        if self._foreground_sessions:
+            token = uuid.uuid4().hex[:16]
+            command = foreground_command(
+                args.command, token, self._previous_token, self._fg_dir
+            )
+            self._previous_token = token
         started = time.monotonic()
         try:
             result = await self._environment.exec(
-                args.command,
+                command,
                 cwd=self._default_workdir,
                 env=dict(EXEC_ENV),
                 timeout_sec=timeout,
@@ -363,15 +489,14 @@ class ToolExecutor:
             # means the sandbox died, not the command — classify first.
             raise_if_environment_gone(e)
             self._exec_failures = 0
-            return ToolResult(
-                f"Command timed out after {timeout}s (timeout_sec={timeout}) "
-                f"and was killed. {self._timeout_guidance(timeout)}",
-                is_error=True,
-            )
+            return await self._timed_out(token, timeout, f"{timeout}s", None)
         except EnvironmentGoneError:
             raise
         except Exception as e:
             raise_if_environment_gone(e)
+            if _is_backend_timeout(e):
+                self._exec_failures = 0
+                return await self._timed_out(token, timeout, f"{timeout}s", None)
             self._exec_failures += 1
             if self._exec_failures >= MAX_CONSECUTIVE_EXEC_FAILURES:
                 if not await self._sandbox_answers():
@@ -392,16 +517,77 @@ class ToolExecutor:
         body = format_exec_output(result.stdout, result.stderr)
         elapsed = time.monotonic() - started
         if self._looks_like_timeout(result.return_code, elapsed, timeout):
-            return ToolResult(
-                f"Command timed out after ~{int(elapsed)}s "
-                f"(timeout_sec={timeout}) and was killed; output up to that "
-                f"point:\n{body}\n{self._timeout_guidance(timeout)}",
-                is_error=True,
-            )
+            return await self._timed_out(token, timeout, f"~{int(elapsed)}s", body)
         return ToolResult(
             f"exit code: {result.return_code}\n{body}",
             is_error=result.return_code != 0,
+            exit_code=result.return_code,
         )
+
+    async def _timed_out(
+        self, token: str | None, timeout: int, took: str, body: str | None
+    ) -> ToolResult:
+        """The result of a timed-out command, after killing what it left
+        running (when its session is known)."""
+        self.n_timeouts += 1
+        cleanup = await self._kill_session(token)
+        self.n_timeout_killed += cleanup.killed
+        self.n_timeout_survivors += len(cleanup.survivors or [])
+        head = f"Command timed out after {took} (timeout_sec={timeout})"
+        if not cleanup.attempted or cleanup.error or cleanup.sid is None:
+            fate = (
+                "; it was stopped, but processes it started may still be "
+                "running: check with `ps` (or ls /proc) before relaunching it"
+            )
+        elif cleanup.survivors:
+            fate = (
+                f"; {cleanup.killed} of its processes were killed, but these "
+                "are still running: " + ", ".join(cleanup.survivors[:10])
+            )
+        elif cleanup.rc is not None and cleanup.killed:
+            fate = (
+                f". The command itself had finished (exit {cleanup.rc}), but "
+                "background processes it started kept its output open until "
+                f"the timeout; they ({cleanup.killed}) were killed. Redirect a "
+                "background job's output so the call can return, e.g. "
+                "`nohup cmd > /tmp/cmd.log 2>&1 &`"
+            )
+        elif cleanup.rc is not None:
+            fate = (
+                f"; the command finished (exit {cleanup.rc}) just as the "
+                "timeout hit, and nothing it started is still running"
+            )
+        elif cleanup.killed:
+            fate = (
+                f" and was killed, together with every process it started "
+                f"({cleanup.killed} in all)"
+            )
+        else:
+            fate = " and was stopped; nothing it started is still running"
+        guidance = self._timeout_guidance(timeout)
+        if body is None:
+            return ToolResult(f"{head}{fate}. {guidance}", is_error=True)
+        return ToolResult(
+            f"{head}{fate}. Output up to that point:\n{body}\n{guidance}",
+            is_error=True,
+        )
+
+    async def _kill_session(self, token: str | None) -> TimeoutCleanup:
+        if token is None:
+            return TimeoutCleanup()
+        command = (
+            f"fg_dir={shlex.quote(self._fg_dir)}; token={token};\n"
+            f"{utils.read_script('kill_session.sh')}"
+        )
+        try:
+            result = await self._environment.exec(
+                command, timeout_sec=KILL_SESSION_TIMEOUT_SEC, user="root"
+            )
+        except Exception as e:  # noqa: BLE001 - backends raise varied types
+            raise_if_environment_gone(e)
+            return TimeoutCleanup(attempted=True, error=f"{type(e).__name__}: {e}")
+        raise_if_exec_result_gone(result)
+        return parse_kill_session(str(result.stdout or ""))
 
     async def _sandbox_answers(self) -> bool:
         """Whether a trivial command still runs in the sandbox. A probe that

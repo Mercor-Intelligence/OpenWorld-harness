@@ -46,6 +46,8 @@ DISCARD_EXCERPT_CHARS = 2000
 EXPORT_FINALIZE_WAIT_SEC = 300
 # Agent-logs directory of the latest submission export.
 EXPORT_DIR_NAME = "winner"
+# export_submission.sh: the changed files exceed the export limit.
+EXPORT_TOO_LARGE_EXIT = 5
 
 
 @dataclass
@@ -139,6 +141,8 @@ class Proximus(BaseAgent):
         # Background copy of the newest submission off the sandbox.
         self._export_task: asyncio.Task | None = None
         self._export_pending: tuple[int, str] | None = None
+        # Told to the model with its next tool result: exports that failed.
+        self._export_notes: list[str] = []
 
     @staticmethod
     @override
@@ -203,6 +207,7 @@ class Proximus(BaseAgent):
             environment,
             default_workdir=workdir,
             remaining_sec=self._remaining_budget_sec,
+            foreground_sessions=self._foreground_sessions,
         )
         await self._init_submissions(environment, workdir)
         await self._arm_timer(environment)
@@ -490,6 +495,9 @@ class Proximus(BaseAgent):
                     "end the run, call submit and then submit again with no "
                     "other tool calls in between.)"
                 )
+            if self._export_notes:
+                result.content += "".join(f"\n\n{n}" for n in self._export_notes)
+                self._export_notes.clear()
 
             if call.name == "submit" and result.ends_run:
                 self._run.ended_by_submit = True
@@ -742,6 +750,9 @@ class Proximus(BaseAgent):
                 return
             except Exception as e:  # noqa: BLE001 — an export never fails the run
                 self.logger.warning(f"Export of submission #{index} errored: {e}")
+                self._export_notes.append(
+                    prompts.export_failed_note(index, f"{type(e).__name__}: {e}")
+                )
                 continue
             if manifest.get("ok"):
                 self.logger.info(
@@ -751,6 +762,13 @@ class Proximus(BaseAgent):
             else:
                 self.logger.warning(
                     f"Submission #{index} not exported: {manifest.get('reason')}"
+                )
+                self._export_notes.append(
+                    prompts.export_failed_note(
+                        index,
+                        str(manifest.get("reason") or "unknown error"),
+                        too_large=manifest.get("exit_code") == EXPORT_TOO_LARGE_EXIT,
+                    )
                 )
 
     async def _finish_exports(self) -> None:
@@ -895,14 +913,24 @@ class Proximus(BaseAgent):
 
     async def _ensure_progress_dir(self, environment: BaseEnvironment) -> None:
         """Pre-create the durable-notes directory so the model's first
-        append to PROGRESS.md cannot fail on a missing parent."""
+        append to PROGRESS.md cannot fail on a missing parent, and find out
+        whether bash calls can run in their own session (so a timeout can
+        kill everything the command started; see tools.FG_SESSION_PROBE)."""
+        self._foreground_sessions = False
         try:
-            await environment.exec(
-                f"mkdir -p {prompts.PROGRESS_FILE.parent}", timeout_sec=30
+            result = await environment.exec(
+                f"mkdir -p {prompts.PROGRESS_FILE.parent}; {tools.FG_SESSION_PROBE}",
+                timeout_sec=30,
             )
+            self._foreground_sessions = "fg-sessions-ok" in str(result.stdout or "")
         except Exception as e:  # noqa: BLE001 - backends raise varied types
             self.logger.debug(
                 f"Could not pre-create {prompts.PROGRESS_FILE.parent}: {e}"
+            )
+        if not self._foreground_sessions:
+            self.logger.warning(
+                "bash calls run without their own session (no setsid?): a "
+                "timed-out command's child processes cannot be killed"
             )
 
     async def _init_submissions(
@@ -1104,6 +1132,18 @@ class Proximus(BaseAgent):
             "fallback_attempted_turns": run.fallback_attempted_turns,
             "fallback_turns": run.fallback_turns,
             "fallback_models": dict(run.fallback_models),
+            **self._bash_timeout_metadata(),
+        }
+
+    def _bash_timeout_metadata(self) -> dict[str, Any]:
+        executor = getattr(self, "_executor", None)
+        if executor is None:
+            return {}
+        return {
+            "foreground_sessions": getattr(self, "_foreground_sessions", False),
+            "bash_timeouts": executor.n_timeouts,
+            "bash_timeout_killed": executor.n_timeout_killed,
+            "bash_timeout_survivors": executor.n_timeout_survivors,
         }
 
     def _inject_user(
