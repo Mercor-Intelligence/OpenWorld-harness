@@ -578,10 +578,249 @@ async def test_no_watchdog_without_a_memory_limit_or_when_disabled(
 def test_scripts_parse_under_dash():
     if shutil.which("dash") is None:
         pytest.skip("no dash")
-    for name in ("memwatch.sh",):
+    for name in ("memwatch.sh", "memsample.sh"):
         result = subprocess.run(
             ["dash", "-n", str(Path(memwatch.__file__).parent / "scripts" / name)],
             capture_output=True,
             text=True,
         )
         assert result.returncode == 0, result.stderr
+
+
+# ----- pass@8: host-side poller, samples, peak, GPU wording -----
+
+SAMPLE_OUT = "\n".join(
+    [
+        "mem\tcg=1 usage=%d max=%d epoch=1790000100 src=cgroup1 sused="
+        % (40 * GIB, 41 * GIB),
+        "stat\ttotal_cache=%d" % (6 * GIB),
+        "stat\ttotal_shmem=%d" % (2 * GIB),
+        "stat\ttotal_rss=%d" % (30 * GIB),
+        "peak\t%d" % (39 * GIB),
+        # rss pages (4 KiB): three DataLoader workers in one group
+        "procs\t%d\t4" % (14 * GIB // 4096),
+        "grp\t100\t%d\t3" % (13 * GIB // 4096),
+        "grp\t200\t%d\t1" % (1 * GIB // 4096),
+        "top\t101\t100\t%d\tpython3\tpython3 train.py --workers 2" % (5 * GIB // 4096),
+        "top\t200\t200\t%d\tnvcc with space\t" % (1 * GIB // 4096),
+        "df\t/dev/shm\t2097152\t33554432",
+        "gpu\t70000\t81559",
+    ]
+)
+
+
+def test_parse_sample_reads_the_counter_processes_and_groups():
+    sample = memwatch.parse_sample(SAMPLE_OUT, page=4096)
+    # used = usage - (cache - shmem), as the loop computes it
+    assert sample["used_mb"] == 36 * 1024
+    assert sample["source"] == "cgroup1"
+    assert sample["usage_mb"] == 40 * 1024
+    assert sample["max_usage_mb"] == 41 * 1024
+    assert sample["peak_mb"] == 39 * 1024
+    assert sample["stat_mb"]["total_rss"] == 30 * 1024
+    assert sample["top"][0] == [101, 100, 5 * 1024, "python3 train.py --workers 2"]
+    assert sample["top"][-1] == [200, 200, 1024, "nvcc with space"]
+    assert sample["groups"][0] == [100, 13 * 1024, 3]
+    assert sample["df_mb"]["/dev/shm"] == [2048, 32768]
+    assert sample["gpu_mb"] == [[70000, 81559]]
+    assert sample["n_procs"] == 4
+    assert sample["rss_total_mb"] == 14 * 1024
+
+
+def test_a_sample_uses_the_loops_reading_for_non_cgroup_sources():
+    # gVisor without cgroup files: the loop reads MemTotal - MemAvailable.
+    out = "mem\tcg= usage= max= epoch=1790000100 src=meminfo sused=%d\n" % (20 * GIB)
+    sample = memwatch.parse_sample(out, page=4096)
+    assert sample["used_mb"] == 20 * 1024 and sample["usage_mb"] is None
+    # A cgroup counter is not mistaken for the reading of another source.
+    out = "mem\tcg=1 usage=%d max= epoch=1 src=meminfo sused=\n" % (40 * GIB)
+    assert memwatch.parse_sample(out, page=4096)["used_mb"] is None
+
+
+class PollEnv(WatchEnv):
+    """WatchEnv that also answers the poller's sample section."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.samples = 0
+
+    async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
+        result = await super().exec(command, cwd, env, timeout_sec, user)
+        if "procs=$(" in command:
+            self.samples += 1
+            result.stdout = (result.stdout or "") + SAMPLE_OUT + "\n"
+        return result
+
+
+async def test_poller_collects_events_and_samples_without_tool_calls(tmp_path):
+    env = PollEnv()
+    samples_file = tmp_path / "memwatch.jsonl"
+    watchdog = make_watchdog(
+        env,
+        memory_mb=40960,
+        poll_interval_sec=0.01,
+        samples_path=samples_file,
+        gpus=True,
+    )
+    assert await watchdog.start()
+    env.lines = [kill_line(1)]
+    watchdog.start_polling()
+    assert watchdog.polling and not watchdog.due()
+    for _ in range(200):
+        if env.samples >= 5:
+            break
+        await asyncio.sleep(0.01)
+    (event,) = watchdog.take_pending()
+    assert event.kind == "kill"
+    assert watchdog.take_pending() == []  # told once
+    await watchdog.stop()
+    assert not watchdog.polling
+    meta = watchdog.metadata()
+    assert meta["n_samples"] >= 5 and meta["lost_with_sandbox"] is False
+    assert len(meta["last_samples"]) == memwatch.KEPT_SAMPLES_ALIVE
+    # The loop's peak; the cgroup's raw max (41 GiB) counts page cache.
+    assert meta["peak_used_mb"] == 39 * 1024
+    # 36 GiB of a 40 GiB limit is above the high-water mark: every sample kept.
+    assert len(samples_file.read_text().splitlines()) == meta["n_samples"]
+    # GPU memory is read on the first poll and every GPU_EVERY after.
+    sample_cmds = [c["command"] for c in env.calls if "procs=$(" in c["command"]]
+    assert "gpu=1" in sample_cmds[0] and "gpu=0" in sample_cmds[1]
+
+
+async def test_only_every_few_samples_are_persisted_below_high_water(tmp_path):
+    env = PollEnv()
+    samples_file = tmp_path / "memwatch.jsonl"
+    # 36 GiB used of a 128 GiB limit: below 75%.
+    watchdog = make_watchdog(env, memory_mb=131072, samples_path=samples_file)
+    await watchdog.start()
+    for _ in range(8):
+        await watchdog.check(sample=True)
+    assert watchdog.n_samples == 8
+    assert len(samples_file.read_text().splitlines()) == 8 // memwatch.PERSIST_EVERY
+
+
+async def test_a_sandbox_lost_while_polling_keeps_every_sample(tmp_path):
+    env = PollEnv()
+    watchdog = make_watchdog(env, poll_interval_sec=0.01)
+    await watchdog.start()
+    watchdog.start_polling()
+    for _ in range(200):
+        if env.samples >= memwatch.RING_SAMPLES + 5:
+            break
+        await asyncio.sleep(0.01)
+    env.fail = type("SandboxTerminatedError", (Exception,), {})("gone")
+    await asyncio.sleep(0.05)
+    # A failed poll decides nothing: the kill loop may be alive and must still
+    # be stopped before grading. The agent loop calls lost() on env_lost.
+    assert watchdog.polling and not watchdog.lost_with_sandbox
+    await watchdog.lost()
+    assert not watchdog.polling
+    meta = watchdog.metadata()
+    assert meta["lost_with_sandbox"] is True
+    assert len(meta["last_samples"]) == memwatch.RING_SAMPLES
+    assert await watchdog.stop() == []  # nothing is sent to a dead sandbox
+
+
+@needs_proc
+def test_the_loop_records_its_peak(tmp_path, victims):
+    v = victims(1)
+    state = tmp_path / "state"
+    usage = tmp_path / "usage"
+    usage.write_text(f"{1 * GIB}\n")
+    proc = run_script(
+        state, usage, threshold=60 * GIB, limit=64 * GIB, ticks=4, scope=v.big.pid
+    )
+    try:
+        assert wait_for(lambda: (state / "peak").exists(), 5)
+        assert int((state / "peak").read_text()) == 1 * GIB
+        usage.write_text(f"{3 * GIB}\n")
+        assert wait_for(lambda: int((state / "peak").read_text()) == 3 * GIB, 5)
+        # A small rise is not written; a fall never is.
+        usage.write_text(f"{3 * GIB + MIB}\n")
+        time.sleep(1.5)
+        assert int((state / "peak").read_text()) == 3 * GIB
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+@needs_proc
+async def test_real_poll_reads_the_loop_and_the_processes(tmp_path, victims):
+    v = victims(64)
+    state = tmp_path / "state"
+    usage = tmp_path / "usage"
+    usage.write_text(f"{2 * GIB}\n")
+    watchdog = make_watchdog(
+        LocalEnv(),
+        memory_mb=4096,
+        source=f"file:{usage}",
+        state_dir=str(state),
+        scope_sid=v.big.pid,
+    )
+    try:
+        assert await watchdog.start()
+        await watchdog.check(sample=True)
+        (sample,) = watchdog.samples
+        assert sample["peak_mb"] == 2048
+        assert sample["source"] == "file" and sample["used_mb"] == 2048
+        assert sample["n_procs"] >= 2  # the victims, at least
+        assert sample["rss_total_mb"] >= sum(row[2] for row in sample["top"])
+        assert 1 <= len(sample["top"]) <= memwatch.TOP_PROCESSES
+        assert all(isinstance(row[0], int) for row in sample["top"])
+        assert 1 <= len(sample["groups"]) <= memwatch.TOP_GROUPS
+        # Groups are the largest by resident memory, and within the total.
+        sizes = [g[1] for g in sample["groups"]]
+        assert sizes == sorted(sizes, reverse=True)
+        assert sizes[0] <= sample["rss_total_mb"]
+        await watchdog.stop()
+    finally:
+        for pid in loops(state):
+            os.kill(pid, signal.SIGKILL)
+
+
+def test_gpu_sandboxes_get_the_same_memory_wording():
+    # The pass@8 probe: on Modal the counter sees pinned memory and CUDA
+    # contexts, and the GPU "OOM" deaths were preemptions.
+    gpu = sandbox_limits_note({"memory_mb": 65536, "gpus": 1}, watchdog=True)
+    cpu = sandbox_limits_note({"memory_mb": 65536}, watchdog=True)
+    assert gpu is not None and cpu is not None
+    assert (
+        "The memory limit is enforced" in gpu and "The memory limit is enforced" in cpu
+    )
+
+
+class PolledFakeEnv(FakeEnv):
+    """FakeEnv whose watchdog reports a kill from the background, while the
+    model's command exits 0."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.watch = PollEnv()
+
+    async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
+        if "proximus-memwatch" in command:
+            self.all_commands.append(command)
+            return await self.watch.exec(command, cwd, env, timeout_sec, user)
+        if "sleep 1" in command:
+            self.all_commands.append(command)
+            self.watch.lines = [kill_line(1, pid=888)]
+            await asyncio.sleep(0.2)  # the poller runs meanwhile
+            return ExecResult(stdout="", stderr="", return_code=0)
+        return await super().exec(command, cwd, env, timeout_sec, user)
+
+
+async def test_agent_tells_the_model_about_a_background_kill(tmp_path, monkeypatch):
+    monkeypatch.setattr(memwatch, "POLL_INTERVAL_SEC", 0.02)
+    fake = FakeCompletion([bash_response("sleep 1"), *finish_responses()])
+    monkeypatch.setattr(litellm, "acompletion", fake)
+    agent = make_agent(tmp_path, sandbox_limits={"memory_mb": 65536})
+    env = PolledFakeEnv()
+    context = AgentContext()
+    await agent.run("Task", env, context)  # type: ignore[arg-type]
+
+    tool_result = next(m for m in read_messages(agent) if m["role"] == "tool")
+    assert "exit code: 0" in tool_result["content"]
+    assert "Memory watchdog: killed PID 888" in tool_result["content"]
+    metadata = (context.metadata or {})["memory_watchdog"]
+    assert metadata["n_samples"] > 0 and metadata["lost_with_sandbox"] is False
+    assert (agent.logs_dir / "memwatch.jsonl").exists()

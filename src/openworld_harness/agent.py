@@ -18,6 +18,8 @@ from openworld_harness import memwatch, tools
 from openworld_harness.web.agent import WebTools
 
 LIMITS_PATH = "/tmp/proximus/limits.json"
+# Host-side memory samples (see memwatch.start_polling), in the agent logs.
+MEMWATCH_SAMPLES_FILE = "memwatch.jsonl"
 
 
 WATCHDOG_STOP_TIMEOUT_SEC = 15
@@ -167,9 +169,12 @@ class OpenWorldHarness(WebTools):
             source=self.config.memory_watchdog_source,
             lifetime_sec=lifetime,
             logger=self.logger,
+            gpus=bool((self.config.sandbox_limits or {}).get("gpus")),
+            samples_path=self.logs_dir / MEMWATCH_SAMPLES_FILE,
         )
         try:
-            await self._watchdog.start()
+            if await self._watchdog.start():
+                self._watchdog.start_polling()
         except tools.EnvironmentGoneError as e:
             # The core's first command finds out and ends the run.
             self.logger.warning(f"Memory watchdog not started: {e}")
@@ -181,9 +186,15 @@ class OpenWorldHarness(WebTools):
             return
         run = getattr(self, "_run", None)
         if run is not None and run.env_lost:
+            # Nothing to stop; keep the samples taken before the death.
+            await watchdog.lost()
             return
         try:
             await asyncio.wait_for(watchdog.stop(), WATCHDOG_STOP_TIMEOUT_SEC)
+        except tools.EnvironmentGoneError as e:
+            # Died after the agent's last command (during a model call).
+            self.logger.warning(f"Memory watchdog not stopped: {e}")
+            await watchdog.lost()
         except Exception as e:  # noqa: BLE001 — never fail the run here
             self.logger.warning(f"Memory watchdog not stopped: {e}")
 
@@ -191,9 +202,13 @@ class OpenWorldHarness(WebTools):
     async def _bash(self, args: tools.BashArgs) -> tools.ToolResult:
         result = await super()._bash(args)
         watchdog = self._watchdog
-        if watchdog is not None and (result.exit_code == 137 or watchdog.due()):
-            events = await watchdog.check()
-            result.content += memwatch.watchdog_note(events, watchdog.memory_mb)
+        if watchdog is None:
+            return result
+        if result.exit_code == 137 or watchdog.due():
+            await watchdog.check()
+        # The poller's events too, once each.
+        events = watchdog.take_pending()
+        result.content += memwatch.watchdog_note(events, watchdog.memory_mb)
         return result
 
     @override

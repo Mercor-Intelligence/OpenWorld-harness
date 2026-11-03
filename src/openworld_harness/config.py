@@ -88,6 +88,15 @@ class ProximusConfig(AgentOptions):
     With ``stream: true`` the response is streamed and rebuilt; usage is
     requested (``stream_options.include_usage``) unless set here."""
 
+    content_filter_attempts: int = Field(default=4, ge=1)
+    """Times one request is sent when the provider's output filter blanks the
+    response (finish reason ``content_filter``, no text, no tool call). Such a
+    response is not a model turn and never counts toward the empty-turn stall.
+    After the last attempt the run takes the refusal path: the newest tool
+    output is withheld and the request tried again as often; if that is
+    filtered too, the run ends as a provider failure and the winner is
+    graded."""
+
     stream_idle_timeout_sec: float | None = Field(default=None, gt=0)
     """With a streamed request, give up on an attempt (and retry it) when no
     chunk arrives for this long. Leave unset for providers that stay silent
@@ -96,6 +105,18 @@ class ProximusConfig(AgentOptions):
     max_turns: int | None = Field(default=None, ge=1)
     """Maximum number of loop iterations, including retries. Reaching it ends
     the run like a time-out, with the usual exit submit and restore."""
+
+    toolless_nudge_after: int = Field(default=20, ge=1)
+    """Turns in a row without a tool call (prose or empty) that are answered
+    with the neutral "Continue.". Each later one is answered with a message
+    naming the ways on (a tool call, or submit) and the turn limit, as is any
+    turn that repeats the previous two replies word for word."""
+
+    toolless_turn_limit: int = Field(default=50, ge=0)
+    """End the run after this many turns in a row without a tool call, like a
+    time-out: the exit submit and restore run and the winner is graded
+    (``ended_by`` is ``prose_loop``). 0: no limit. The longest legitimate run
+    seen across 1,288 pass@8 trials was 32."""
 
     enable_summarize: bool = True
     """Summarize the conversation when it nears the context limit. When off, a

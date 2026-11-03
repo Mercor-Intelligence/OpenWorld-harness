@@ -24,6 +24,7 @@
 # Files in STATE (root-only):
 #   pid          this loop's PID (one instance per STATE)
 #   status       "source=<s> used=<bytes> page=<bytes>" once started, or source=none
+#   peak         the highest reading so far (rewritten when it grows by 64 MiB)
 #   events.tsv   seq, epoch, kind, used, limit, pid, rss, command (tab-separated)
 #                kind: kill | nokill (over the threshold, no process big enough) | expire
 #
@@ -122,6 +123,9 @@ if [ "$src" = none ] || ! read_used; then
     exit 0
 fi
 echo "source=$src used=$used page=$page" > "$state/status"
+peak=$used
+peak_written=$used
+echo "$peak" > "$state/peak"
 
 seq=0
 if [ -r "$state/events.tsv" ]; then
@@ -134,6 +138,20 @@ event() {  # kind pid rss command
     seq=$((seq + 1))
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$seq" "$(date +%s)" "$1" \
         "$used" "$limit" "$2" "$3" "$4" >> "$state/events.tsv"
+}
+
+wait_exit() {  # $1 pid: return once it has exited (gone or a zombie), at most ~2 s
+    waited=0     # in 0.2 s steps
+    while [ "$waited" -lt 10 ]; do
+        line=
+        read -r line < "/proc/$1/stat" 2>/dev/null || return 0
+        case "${line##*) }" in Z*|X*) return 0 ;; esac
+        if ! sleep 0.2 2>/dev/null; then
+            sleep 1
+            waited=$((waited + 4))
+        fi
+        waited=$((waited + 1))
+    done
 }
 
 find_victim() {  # -> $vpid, $vrss (bytes); vpid empty when none
@@ -173,6 +191,13 @@ while [ "$tick" -lt "$ticks" ]; do
     tick=$((tick + 1))
     sleep 1
     read_used || continue
+    if [ "$used" -gt "$peak" ]; then
+        peak=$used
+        if [ $((peak - peak_written)) -ge 67108864 ]; then
+            echo "$peak" > "$state/peak"
+            peak_written=$peak
+        fi
+    fi
     [ "$used" -gt "$threshold" ] || continue
     find_victim
     if [ -z "$vpid" ] || [ "$vrss" -lt "$min_victim" ]; then
@@ -191,9 +216,12 @@ while [ "$tick" -lt "$ticks" ]; do
     fi
     if kill -KILL "$vpid" 2>/dev/null; then
         event kill "$vpid" "$vrss" "$cmd"
-        # Let the kernel release the memory before measuring again.
-        sleep 2
-        tick=$((tick + 2))
+        # Measure again a second after the victim has exited (its memory is
+        # released by then): soon enough for a job still growing elsewhere,
+        # late enough not to take a second victim for the same overrun.
+        wait_exit "$vpid"
+        # Ticks are seconds of lifetime: count the wait, rounded up.
+        tick=$((tick + (waited + 4) / 5))
     fi
 done
 event expire 0 0 ""

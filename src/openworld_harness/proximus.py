@@ -31,6 +31,9 @@ import openworld_harness.utils as utils
 from openworld_harness.config import BUDGET_MARGIN_SEC, ProximusConfig
 
 EMPTY_TURN_STALL_LIMIT = 3
+# This many tool-less replies in a row with the same text (whitespace aside)
+# get toolless_loop_message before toolless_nudge_after is reached.
+IDENTICAL_REPLY_ESCALATION = 3
 # Fraction of the context window at which proactive compaction runs
 # Most-recent messages preserved verbatim across a compaction
 KEEP_RECENT_MESSAGES = 6
@@ -62,6 +65,12 @@ class RunState:
     env_lost: bool = False
     consecutive_empty_turns: int = 0
     stalled: bool = False
+    # Turns in a row without a tool call (prose or empty), the longest such
+    # run, and how many replies in a row repeat the same text.
+    consecutive_toolless_turns: int = 0
+    max_toolless_turns: int = 0
+    last_toolless_text: str | None = None
+    identical_toolless_turns: int = 0
     last_context_tokens: int | None = None
     total_prompt_tokens: int = 0
     total_completion_tokens: int = 0
@@ -71,12 +80,15 @@ class RunState:
     fallback_turns: int = 0
     fallback_models: dict[str, int] = field(default_factory=dict)
     n_images: int = 0  # viewed images saved under <logs_dir>/images/
-    # How the run ended: submit, budget, max_turns, stall, provider_failure,
-    # sandbox_death, cancelled (Harbor's agent timeout) or error.
+    # How the run ended: submit, budget, max_turns, stall, prose_loop,
+    # provider_failure, sandbox_death, cancelled (Harbor's agent timeout) or
+    # error.
     ended_by: str | None = None
     # Set when the provider ended the run early and the winner is still graded.
     provider_failure: dict[str, Any] | None = None
     consecutive_refusals: int = 0
+    # Responses the provider's output filter blanked (sent again, not turns).
+    content_filter_hits: int = 0
 
 
 class Proximus(BaseAgent):
@@ -131,6 +143,7 @@ class Proximus(BaseAgent):
             provider_health_path=self.logs_dir / "provider_health.json",
             extra_env=self.extra_env,
             on_provider_event=self._record_provider_event,
+            on_discarded_response=self._record_filtered_response,
         )
         self._context_limit = self._llm.resolve_context_limit()
         self._system_prompt = self.system_prompt()
@@ -313,10 +326,26 @@ class Proximus(BaseAgent):
                 continue
             except llm.ProviderRefusalError as e:
                 self._run.consecutive_refusals += 1
-                if (
+                filtered = e.code == llm.CONTENT_FILTER_CODE
+                withheld = (
                     self._run.consecutive_refusals == 1
                     and self._withhold_newest_output()
-                ):
+                )
+                if filtered and self._run.consecutive_refusals == 1:
+                    # The note alone changes the request, so a filtered one is
+                    # retried even with no tool output to withhold.
+                    self.logger.warning(
+                        "The provider's content filter blanked every response "
+                        "to the request; "
+                        f"{'withheld the newest tool output and ' if withheld else ''}"
+                        "retrying."
+                    )
+                    self._inject_user(
+                        prompts.content_filter_message(withheld=withheld),
+                        "content_filter",
+                    )
+                    continue
+                if withheld:
                     self.logger.warning(
                         f"Provider refused the request ({e.code}); withheld the "
                         "newest tool output and retrying."
@@ -404,6 +433,7 @@ class Proximus(BaseAgent):
             self._accumulate_usage(parsed)
             self._run.messages.extend(self._llm.assistant_messages(parsed))
             stalled = self._model_stalled(parsed)
+            toolless = self._count_toolless(parsed)
 
             if not parsed.tool_calls:
                 self._add_agent_step(parsed, [], [])
@@ -416,8 +446,32 @@ class Proximus(BaseAgent):
                     self._run.stalled = True
                     self._run.ended_by = "stall"
                     return
+                limit = self.config.toolless_turn_limit
+                if limit and toolless >= limit:
+                    self.logger.warning(
+                        f"{toolless} turns in a row without a tool call; ending "
+                        "the run."
+                    )
+                    self._run.ended_by = "prose_loop"
+                    self._add_step(
+                        "system",
+                        f"Run ended: {toolless} turns in a row without a tool "
+                        "call; the restored winner is graded.",
+                        extra={"toolless_turns": toolless},
+                    )
+                    self._dump_artifacts()
+                    return
 
-                if self._run.submit_armed_turn is not None:
+                if self._toolless_escalated() and not parsed.is_empty:
+                    self._inject_user(
+                        prompts.toolless_loop_message(
+                            toolless,
+                            limit - toolless if limit else None,
+                            armed=self._run.submit_armed_turn is not None,
+                        ),
+                        "toolless_loop",
+                    )
+                elif self._run.submit_armed_turn is not None:
                     self._inject_user(
                         prompts.CONTINUE_OR_CONFIRM_MESSAGE, "continue_or_confirm"
                     )
@@ -441,6 +495,36 @@ class Proximus(BaseAgent):
             self._run.consecutive_empty_turns + 1 if parsed.is_empty else 0
         )
         return self._run.consecutive_empty_turns >= EMPTY_TURN_STALL_LIMIT
+
+    def _count_toolless(self, parsed: llm.ParsedResponse) -> int:
+        """Track turns without a tool call and repeated replies; returns the
+        current run of tool-less turns, this one included."""
+        run = self._run
+        if parsed.tool_calls:
+            run.consecutive_toolless_turns = 0
+            run.last_toolless_text = None
+            run.identical_toolless_turns = 0
+            return 0
+        run.consecutive_toolless_turns += 1
+        run.max_toolless_turns = max(
+            run.max_toolless_turns, run.consecutive_toolless_turns
+        )
+        text = " ".join(parsed.content.split())
+        if text and text == run.last_toolless_text:
+            run.identical_toolless_turns += 1
+        else:
+            run.identical_toolless_turns = 1 if text else 0
+        run.last_toolless_text = text or None
+        return run.consecutive_toolless_turns
+
+    def _toolless_escalated(self) -> bool:
+        """The neutral closer stops working: a long run of tool-less turns, or
+        the same reply over and over."""
+        run = self._run
+        return (
+            run.consecutive_toolless_turns > self.config.toolless_nudge_after
+            or run.identical_toolless_turns >= IDENTICAL_REPLY_ESCALATION
+        )
 
     async def _execute_tool_calls(self, parsed: llm.ParsedResponse) -> bool:
         """Run the turn's tool calls; True when a confirmed final submission
@@ -1027,6 +1111,12 @@ class Proximus(BaseAgent):
         )
         self._dump_artifacts()
 
+    def _record_filtered_response(self, parsed: llm.ParsedResponse) -> None:
+        """A response the provider's output filter blanked: billed, never a
+        turn (the provider event step records the attempt itself)."""
+        self._accumulate_usage(parsed, kept=False)
+        self._run.content_filter_hits += 1
+
     def _record_discard(self, error: OutputLengthExceededError) -> None:
         """Count a discarded over-long response's usage and log what was
         discarded (the model is told only that it was)."""
@@ -1127,8 +1217,10 @@ class Proximus(BaseAgent):
             "ended_by": run.ended_by,
             "provider_failure": run.provider_failure,
             "provider_lost_sec": round(self._llm.provider_lost_sec, 1),
+            "content_filter_hits": run.content_filter_hits,
             "env_lost": run.env_lost,  # cut short by a dead sandbox
             "stalled": run.stalled,  # ended by the empty-turn breaker
+            "max_toolless_turns": run.max_toolless_turns,
             "fallback_attempted_turns": run.fallback_attempted_turns,
             "fallback_turns": run.fallback_turns,
             "fallback_models": dict(run.fallback_models),

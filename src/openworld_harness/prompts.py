@@ -126,6 +126,22 @@ PROVIDER_REFUSAL_MESSAGE = (
     "unchanged. Continue the task."
 )
 
+
+def content_filter_message(*, withheld: bool) -> str:
+    """After a request's responses were blanked by the provider's output
+    filter ``content_filter_attempts`` times in a row."""
+    text = (
+        "The model provider's content filter blocked your last replies, so "
+        "nothing from them was kept."
+    )
+    if withheld:
+        text += (
+            " The output of your most recent tool call(s) was withheld from the "
+            "conversation in case it set off the filter."
+        )
+    return text + " The sandbox is unchanged. Continue the task."
+
+
 INVALID_IMAGE_MESSAGE = (
     "Request failed: {error}\n"
     "The provider rejected the most recently attached image, so its payload "
@@ -135,7 +151,8 @@ INVALID_IMAGE_MESSAGE = (
 
 # Closes every text-only assistant turn (Anthropic rejects a conversation
 # ending in an assistant message). Deliberately neutral: prose turns are
-# legitimate work and must not be nagged.
+# legitimate work and must not be nagged (an early nag pushes reasoning out of
+# prose). Only a long unbroken run of them gets toolless_loop_message.
 CONTINUE_MESSAGE = "Continue."
 
 # While a submission awaits confirmation a bare "Continue." reads as "do
@@ -153,6 +170,37 @@ EMPTY_RESPONSE_MESSAGE = (
     "note on what you are doing next. If you consider the task complete, "
     "call `submit`."
 )
+
+
+def toolless_loop_message(n: int, left: int | None, *, armed: bool) -> str:
+    """Closes a prose turn once a long run of turns had no tool call (in the
+    pass@8 sweep a model repeated one sentence ~1,000 times, never calling
+    submit). ``n``: turns in a row without a tool call, this one included;
+    ``left``: such turns left before the run ends (None: no limit);
+    ``armed``: a submission awaits confirmation."""
+    text = (
+        f"Continue. Your last {n} replies had no tool call, and only tool calls "
+        "do work in the sandbox."
+    )
+    if armed:
+        text += (
+            " Make a tool call now, or, if nothing more can be gained, call "
+            "`submit` again now to confirm your recorded submission and end "
+            "the run."
+        )
+    else:
+        text += (
+            " Make a tool call now. If nothing more can be gained, call "
+            "`submit` to record your work; calling `submit` again right after "
+            "it ends the run."
+        )
+    if left is not None:
+        text += (
+            f" After {left} more {'reply' if left == 1 else 'replies'} without "
+            "a tool call, the run ends and your latest recorded submission is "
+            "graded."
+        )
+    return text
 
 
 def system_prompt(task_provides_timer: bool = False) -> str:

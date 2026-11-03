@@ -200,6 +200,35 @@ class StreamStalledError(RuntimeError):
     was still open when the attempt's time ran out. Retried."""
 
 
+class ProviderContentFilterError(RuntimeError):
+    """The provider's output filter blanked the response: every choice ended
+    with finish reason ``content_filter`` and there is no text and no tool call
+    (Gemini's SAFETY, RECITATION, PROHIBITED_CONTENT... all map to it; not
+    raised for Anthropic models, whose "refusal" maps to it as well). Not a
+    model turn: the request is sent again, up to ``content_filter_attempts``
+    times, then ``LLM.query`` raises ``ProviderRefusalError`` with code
+    ``content_filter``. In the pass@8 sweep, counting these as empty turns ended
+    15% of Gemini runs as stalls. ``parsed`` carries the billed usage;
+    ``details`` the provider's safety/citation data, as text."""
+
+    def __init__(self, parsed: "ParsedResponse", details: str = ""):
+        tokens = parsed.completion_tokens
+        super().__init__(
+            f"the provider's content filter blanked the response ({tokens} "
+            f"completion tokens){': ' + details if details else ''}"
+        )
+        self.parsed = parsed
+        self.details = details
+
+
+# ProviderRefusalError code once a request's responses stay filtered.
+CONTENT_FILTER_CODE = "content_filter"
+# Response metadata LiteLLM keeps from Gemini that tells the filters apart
+# (it maps every blocking finish reason to "content_filter").
+_FILTER_DETAIL_KEYS = ("vertex_ai_safety_ratings", "vertex_ai_citation_metadata")
+_FILTER_DETAIL_CHARS = 500
+
+
 class ProviderRefusalError(RuntimeError):
     """The provider refused the request (a policy classifier, not a fault).
 
@@ -303,6 +332,9 @@ def _is_retryable(error: BaseException) -> bool:
     if provider_refusal_code(error) is not None:
         # Replayed up to REFUSAL_ATTEMPTS times (_StopAfterRefusals), then
         # LLM.query raises ProviderRefusalError for the agent loop.
+        return True
+    if isinstance(error, ProviderContentFilterError):
+        # Sampled again up to content_filter_attempts times (_StopAfterFilters).
         return True
     if isinstance(
         error, litellm.exceptions.BadRequestError
@@ -783,7 +815,26 @@ class _StopAfterRefusals(tenacity.stop.stop_base):
         )
 
 
+class _StopAfterFilters(tenacity.stop.stop_base):
+    """Stop once ``attempts`` responses in a row to one request came back
+    filtered."""
+
+    def __init__(self, attempts: int, filtered: Callable[[], int]):
+        self._attempts = attempts
+        self._filtered = filtered
+
+    @override
+    def __call__(self, retry_state: tenacity.RetryCallState) -> bool:
+        outcome = retry_state.outcome
+        error = outcome.exception() if outcome is not None and outcome.failed else None
+        return (
+            isinstance(error, ProviderContentFilterError)
+            and self._filtered() >= self._attempts
+        )
+
+
 ProviderEventHook = Callable[[dict[str, Any]], None]
+DiscardedResponseHook = Callable[["ParsedResponse"], None]
 
 
 class LLM:
@@ -800,6 +851,7 @@ class LLM:
         *,
         extra_env: dict[str, str] | None = None,
         on_provider_event: ProviderEventHook | None = None,
+        on_discarded_response: DiscardedResponseHook | None = None,
     ):
         _install_litellm_reasoning_only_patch()
         self.model_name = model_name
@@ -809,6 +861,9 @@ class LLM:
         # Called once per failed attempt that is retried or ends the query, with
         # what the trajectory records (see Proximus._record_provider_event).
         self._on_provider_event = on_provider_event
+        # Called with each billed response that never reaches the agent (a
+        # filtered one), so its usage and cost are still counted.
+        self._on_discarded_response = on_discarded_response
         # Wall time of failed provider attempts plus their backoff sleeps.
         self.provider_lost_sec = 0.0
         self._provider_health = _ProviderHealth(
@@ -902,9 +957,11 @@ class LLM:
         messages: list[Message],
         tools: list[dict[str, Any]] | None,
     ) -> ParsedResponse:
+        filtered = 0
         stops: list[tenacity.stop.stop_base] = [
             _StopWhenBudgetSpent(self._remaining_sec),
             _StopAfterRefusals(),
+            _StopAfterFilters(self._config.content_filter_attempts, lambda: filtered),
         ]
         if self._remaining_sec() is None:
             stops.append(tenacity.stop_after_attempt(LLM_RETRIES))
@@ -914,15 +971,24 @@ class LLM:
         async def attempt(
             messages: list[Message], tools: list[dict[str, Any]] | None
         ) -> ModelResponse:
-            nonlocal attempt_started
+            nonlocal attempt_started, filtered
             attempt_started = time.monotonic()
-            return await self._acompletion(messages, tools)
+            try:
+                return await self._acompletion(messages, tools)
+            except ProviderContentFilterError:
+                filtered += 1
+                raise
+            except BaseException:
+                filtered = 0  # "in a row": another failure breaks the streak
+                raise
 
         def before_sleep(retry_state: tenacity.RetryCallState) -> None:
             error = retry_state.outcome.exception() if retry_state.outcome else None
             sleep = retry_state.next_action.sleep if retry_state.next_action else 0.0
             if error is not None:
-                self._provider_health.retrying(error, sleep)
+                if not isinstance(error, ProviderContentFilterError):
+                    # A filtered response is the model's output, not an outage.
+                    self._provider_health.retrying(error, sleep)
                 self._provider_event(
                     "retry",
                     error,
@@ -950,7 +1016,8 @@ class LLM:
             response = await retryer(attempt, messages, tools)
         except BaseException as error:
             if isinstance(error, Exception):
-                self._provider_health.failed(error)
+                if not isinstance(error, ProviderContentFilterError):
+                    self._provider_health.failed(error)
                 if _is_retryable(error):
                     # The last attempt of a request that never succeeded.
                     self._provider_event(
@@ -959,6 +1026,18 @@ class LLM:
                 code = provider_refusal_code(error)
                 if code is not None:
                     raise ProviderRefusalError(code, str(error)[:500]) from error
+                remaining = self._remaining_sec()
+                if isinstance(error, ProviderContentFilterError) and (
+                    remaining is None or remaining > 0
+                ):
+                    # Out of attempts with budget left: the agent loop's
+                    # refusal path. A spent budget keeps the retryable error,
+                    # which the loop handles like any retry-budget expiry.
+                    raise ProviderRefusalError(
+                        CONTENT_FILTER_CODE,
+                        f"{filtered} filtered responses in a row; last: "
+                        f"{str(error)[:400]}",
+                    ) from error
             raise
         self._provider_health.success()
         return self._parse_response(response)
@@ -972,8 +1051,17 @@ class LLM:
         sleep_sec: float = 0.0,
         attempt: int | None = None,
     ) -> None:
-        """Count the lost time and report one failed attempt."""
-        self.provider_lost_sec += max(0.0, attempt_sec) + max(0.0, sleep_sec)
+        """Count the lost time and report one failed attempt. Filtered
+        responses are not provider loss: a run the filter keeps blanking is
+        graded, not failed for a re-run (which would meet the same filter)."""
+        filtered = isinstance(error, ProviderContentFilterError)
+        if not filtered:
+            self.provider_lost_sec += max(0.0, attempt_sec) + max(0.0, sleep_sec)
+        if filtered and self._on_discarded_response is not None:
+            try:
+                self._on_discarded_response(error.parsed)
+            except Exception as hook_error:  # noqa: BLE001 — telemetry only
+                self._logger.debug("Discarded-response hook failed: %s", hook_error)
         if self._on_provider_event is None:
             return
         remaining = self._remaining_sec()
@@ -991,6 +1079,12 @@ class LLM:
         stream_stats = getattr(error, "stream_stats", None)
         if isinstance(stream_stats, dict):
             event["stream"] = stream_stats
+        if isinstance(error, ProviderContentFilterError):
+            event["content_filter"] = {
+                "completion_tokens": error.parsed.completion_tokens,
+                "cost_usd": round(error.parsed.cost_usd, 6),
+                "details": error.details,
+            }
         try:
             self._on_provider_event(event)
         except Exception as hook_error:  # noqa: BLE001 — telemetry only
@@ -1159,7 +1253,35 @@ class LLM:
             # The discarded turn was still generated and billed.
             error.parsed = self._parse_response(response)  # type: ignore[attr-defined]
             raise error
+        filtered = self._content_filtered(response)
+        if filtered is not None:
+            raise filtered
         return response
+
+    def _content_filtered(
+        self, response: ModelResponse
+    ) -> ProviderContentFilterError | None:
+        """The error to raise when the provider's filter blanked the response:
+        every choice finished ``content_filter`` with no text and no tool call
+        (reasoning alone does not make it a turn). None otherwise."""
+        if self.is_anthropic():
+            # LiteLLM maps Anthropic's "refusal" stop reason to content_filter
+            # too: a model refusal (handled by its server-side fallback and
+            # counted as an empty turn), not a filter to resample past.
+            return None
+        choices = list(response.choices or [])
+        if not choices or any(c.finish_reason != "content_filter" for c in choices):
+            return None
+        parsed = self._parse_response(response)
+        if parsed.tool_calls or parsed.content.strip():
+            return None
+        hidden = getattr(response, "_hidden_params", None)
+        details = ""
+        if isinstance(hidden, dict):
+            found = {k: hidden[k] for k in _FILTER_DETAIL_KEYS if hidden.get(k)}
+            if found:
+                details = json.dumps(found, default=str)[:_FILTER_DETAIL_CHARS]
+        return ProviderContentFilterError(parsed, details)
 
     @staticmethod
     async def _collect_stream(

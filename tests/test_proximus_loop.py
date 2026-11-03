@@ -713,6 +713,139 @@ async def test_text_only_turns_are_neither_nagged_nor_terminal(tmp_path, monkeyp
         assert call["messages"][-1]["role"] in ("user", "tool")
 
 
+# ----- tool-less turn cap -----
+# A model can answer "Continue." with prose forever (pass@8: 1,554 and 1,080
+# nudges, $739 and $486). The first toolless_nudge_after prose turns keep the
+# neutral closer; later ones name the ways on; toolless_turn_limit ends the run
+# like a time-out (exit submit + restore, graded).
+
+
+def toolless_closers(agent) -> list[str]:
+    return [
+        str(m.get("content"))
+        for m in read_messages(agent)
+        if m.get("role") == "user"
+        and str(m.get("content")).startswith("Continue. Your last")
+    ]
+
+
+async def test_prose_forever_ends_the_run_at_the_limit(tmp_path, monkeypatch):
+    # Exactly the limit is queued: FakeCompletion would raise on one more.
+    fake = FakeCompletion([text_response(f"thinking {n}...") for n in range(50)])
+    monkeypatch.setattr(litellm, "acompletion", fake)
+
+    agent = make_agent(tmp_path)
+    context = AgentContext()
+    await agent.run("Task", FakeEnv(), context)  # type: ignore[arg-type]
+
+    assert len(fake.calls) == 50
+    assert context.metadata is not None
+    assert context.metadata["ended_by"] == "prose_loop"
+    assert context.metadata["stalled"] is False
+    assert context.metadata["max_toolless_turns"] == 50
+    closers = [
+        m.get("content") for m in read_messages(agent) if m.get("role") == "user"
+    ][1:]  # the task message first
+    # Turns 1-20 neutral, 21-49 escalated, turn 50 ends the run unanswered.
+    assert closers[:20] == [CONTINUE_MESSAGE] * 20
+    escalated = toolless_closers(agent)
+    assert len(escalated) == 29
+    assert escalated[0].startswith("Continue. Your last 21 replies had no tool call")
+    assert "After 29 more replies without a tool call" in escalated[0]
+    assert "After 1 more reply without a tool call" in escalated[-1]
+    steps = read_trajectory(agent)["steps"]
+    assert "50 turns in a row without a tool call" in steps[-1]["message"]
+
+
+async def test_a_tool_call_resets_the_toolless_run(tmp_path, monkeypatch):
+    fake = FakeCompletion(
+        [
+            *[text_response(f"a {n}") for n in range(30)],
+            bash_response("ls"),
+            *[text_response(f"b {n}") for n in range(30)],
+            *finish_responses(),
+        ]
+    )
+    monkeypatch.setattr(litellm, "acompletion", fake)
+
+    agent = make_agent(tmp_path)
+    context = AgentContext()
+    await agent.run("Task", FakeEnv(), context)  # type: ignore[arg-type]
+
+    assert context.metadata is not None
+    assert context.metadata["ended_by"] == "submit"
+    assert context.metadata["max_toolless_turns"] == 30
+    # Turns 21-30 of each run are escalated.
+    assert len(toolless_closers(agent)) == 20
+
+
+async def test_repeated_replies_escalate_early(tmp_path, monkeypatch):
+    fake = FakeCompletion(
+        [
+            text_response("Nothing further can be verified."),
+            text_response("Nothing  further can be\nverified."),
+            text_response("Nothing further can be verified."),
+            bash_response("ls"),
+            *finish_responses(),
+        ]
+    )
+    monkeypatch.setattr(litellm, "acompletion", fake)
+
+    agent = make_agent(tmp_path)
+    context = AgentContext()
+    await agent.run("Task", FakeEnv(), context)  # type: ignore[arg-type]
+
+    closers = [
+        m.get("content") for m in read_messages(agent) if m.get("role") == "user"
+    ][1:4]
+    assert closers[:2] == [CONTINUE_MESSAGE, CONTINUE_MESSAGE]
+    assert closers[2].startswith("Continue. Your last 3 replies had no tool call")
+    assert "call `submit` to record your work" in closers[2]
+
+
+async def test_toolless_limit_zero_never_ends_the_run(tmp_path, monkeypatch):
+    fake = FakeCompletion(
+        [
+            *[text_response(f"thinking {n}") for n in range(60)],
+            *finish_responses(),
+        ]
+    )
+    monkeypatch.setattr(litellm, "acompletion", fake)
+
+    agent = make_agent(tmp_path, toolless_turn_limit=0, toolless_nudge_after=5)
+    context = AgentContext()
+    await agent.run("Task", FakeEnv(), context)  # type: ignore[arg-type]
+
+    assert context.metadata is not None
+    assert context.metadata["ended_by"] == "submit"
+    escalated = toolless_closers(agent)
+    assert len(escalated) == 55
+    assert not any("the run ends" in c for c in escalated)
+
+
+async def test_escalation_while_a_submit_is_armed_names_the_confirm(
+    tmp_path, monkeypatch
+):
+    fake = FakeCompletion(
+        [
+            submit_response(),
+            *[text_response(f"thinking {n}") for n in range(3)],
+            submit_response(),
+        ]
+    )
+    monkeypatch.setattr(litellm, "acompletion", fake)
+
+    agent = make_agent(tmp_path, toolless_nudge_after=2)
+    context = AgentContext()
+    await agent.run("Task", FakeEnv(), context)  # type: ignore[arg-type]
+
+    assert context.metadata is not None
+    assert context.metadata["ended_by"] == "submit"
+    escalated = toolless_closers(agent)
+    assert len(escalated) == 1
+    assert "call `submit` again now to confirm" in escalated[0]
+
+
 # ----- empty-turn stall breaker -----
 # Disjoint from the prose-turn behavior above: a turn with text (or
 # reasoning) is work; a turn with NOTHING is a stuck model. A model that

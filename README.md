@@ -62,6 +62,27 @@ this harness keeps; the model-facing prompts still call the agent Proximus.
   limit, it kills the process with the largest resident set, and the model is told
   in its next bash result. The loop is restarted if a command kills it and stopped
   before grading. `result.json` has `memory_watchdog` (source, kills, events).
+  Every 15 s a host-side poller also collects the loop's events (the model hears
+  of a kill with its next bash result, however long its commands run) and a
+  memory sample: the counter and its parts, the peak, the largest processes and
+  process groups, `/dev/shm` and `/tmp`, and GPU memory on GPU sandboxes. Samples
+  are kept on the host, in `memwatch.jsonl` among the agent logs and in
+  `memory_watchdog.last_samples` (all of the last 10 minutes when the sandbox
+  died). On Modal the counter sees anonymous, pinned (`pin_memory`) and shared
+  memory and CUDA contexts on GPU sandboxes too, but not CUDA managed (UVM)
+  memory. A GPU sandbox that exits 137 was most likely preempted (Modal preempts
+  GPU sandboxes; Harbor reports any exit 137 as "likely out of memory").
+- A response the provider's output filter blanked (finish reason
+  `content_filter`, no text, no tool call; Gemini's SAFETY, RECITATION and so on)
+  is not a model turn: the request is sent again (`content_filter_attempts`, 4),
+  then the newest tool output is withheld and it is tried as often again, and
+  only then does the run end, as a graded provider failure. Upstream counted
+  these as empty turns, and three ended the run as a stall. `result.json` counts
+  `content_filter_hits`; their tokens and cost are included.
+- Prose-only turns get the neutral "Continue." only up to `toolless_nudge_after`
+  (20) in a row, or until the same reply comes back three times. Later ones name
+  the ways on (a tool call, or submit), and `toolless_turn_limit` (50) turns in a
+  row without a tool call end the run like a time-out (`ended_by: prose_loop`).
 - Streamed model calls (`llm_call_kwargs.stream`) request usage, retry a stream
   cut off without a finish reason, and are bounded as a whole by the request
   timeout (see [Options](#options-and-customization)).
