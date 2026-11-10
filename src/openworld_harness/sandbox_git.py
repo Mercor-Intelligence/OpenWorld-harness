@@ -1,6 +1,7 @@
 """Setup steps that let submissions work in task images built without git in mind.
 
-Ported from the RWE eval platform's ``PlatformProximus``; both are off by default.
+Both are off by default; the repository's ``scripts/build-static-git.sh`` builds a
+suitable static git.
 
 - Submissions are commits in a git repository inside the workspace, so a sandbox
   without ``git`` fails at setup. With ``static_git_path`` set, setup copies that

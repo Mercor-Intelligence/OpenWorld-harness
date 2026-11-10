@@ -1,13 +1,14 @@
 # OpenWorld-harness
 
 OpenWorld-harness is a fork of [Proximus](https://github.com/Proximal-Labs/proximus)
-by Proximal AI, modified by Mercor; it is the agent harness of the RWE eval
-platform. It is a coding agent for long-horizon tasks, packaged as an external agent
+by Proximal AI, modified by Mercor. It is the agent harness behind the
+[OpenWorldEngineer](https://openworldengineer.mercor.com) leaderboard. It is a coding
+agent for long-horizon tasks, packaged as an external agent
 for [Harbor](https://pypi.org/project/harbor/). It runs a LiteLLM tool loop on the
 orchestrator host and acts in the sandbox only through Harbor's environment
 interface, so it works with any Harbor environment (Docker, Modal, ...).
 
-Status: `0.2.0`, for Harbor `0.23.0`. "Proximus" below names the upstream design
+Status: `0.3.2.post1`, for Harbor `0.23.0`. "Proximus" below names the upstream design
 this harness keeps; the model-facing prompts still call the agent Proximus.
 
 ## Changes from Proximus
@@ -90,13 +91,15 @@ this harness keeps; the model-facing prompts still call the agent Proximus.
 ## Install and run
 
 ```sh
-uv pip install "openworld-harness @ git+https://github.com/mercor-code-envs/OpenWorld-harness"   # next to Harbor
+uv pip install "openworld-harness @ git+https://github.com/mercor-code-envs/OpenWorld-harness@v0.3.2.post1"   # next to Harbor
 harbor run ... --agent openworld_harness:OpenWorldHarness --model anthropic/claude-opus-5 \
   --ak time_budget_sec=7200
 ```
 
 [examples/agent.yaml](examples/agent.yaml) shows a job-config fragment.
 `harbor agent schema openworld_harness:OpenWorldHarness` lists every option.
+To run OpenWorldEngineer tasks the way the leaderboard did, see
+[Reproducing OpenWorldEngineer runs](#reproducing-openworldengineer-runs).
 
 ## How it works
 
@@ -183,15 +186,21 @@ instruction, not `initial_message()`.
 
 ## Setup options
 
-Both are off by default and run once, as root, before the loop:
+All are off by default and run once, as root, before the loop:
 
 - `static_git_path`: host path of a statically linked `git`. When the sandbox has no
   `git`, it is copied to `/usr/local/bin/git` (with the templates git needs), so
   submissions work in images that ship none. Without it such an image fails at
   setup. A host path is a run option (`--ak` or overrides): task tables reject it.
+  `scripts/build-static-git.sh OUT` builds one for x86-64 Linux (git 2.56.0 and zlib
+  1.3.2, checksum-pinned sources, musl libc; it needs curl, xz-utils, make, gcc and
+  musl-tools). CI builds it and runs `scripts/git-smoke.sh` with it in images that
+  ship no git. The binary is git, licensed GPL-2.0.
 - `large_input_exclude_mb`: in a fresh workspace (not yet a git repository), files
   larger than this many MB are added to `workspace_git_excludes`, so the baseline
   commit never hashes multi-GB inputs. The files stay in place.
+- `large_input_total_mb`: with `large_input_exclude_mb`, the largest remaining files
+  of 1 MB or more are also excluded until the tracked ones total at most this many MB.
 
 `result.json` records what setup did under `agent_result.metadata`: `platform_git`
 (`present` or `installed`) and `platform_git_excludes` (how many files were
@@ -332,6 +341,64 @@ model table, overrides.
 task-relative, and `workspace_git_excludes` defaults to the task's `/app` artifact
 excludes. Invalid options raise `ValueError` before any sandbox starts.
 
+## Reproducing OpenWorldEngineer runs
+
+The [OpenWorldEngineer](https://openworldengineer.mercor.com) leaderboard ran this
+harness (releases 0.3.1 and 0.3.2; this release's agent behaves as 0.3.2) through a
+runner that set a few more things per task. `examples/openworldengineer/` does the same
+with plain Harbor. Run it from a clone, so the locked LiteLLM (1.106.2) is the one used:
+
+```sh
+git clone https://github.com/mercor-code-envs/OpenWorld-harness && cd OpenWorld-harness
+uv sync --locked && . .venv/bin/activate
+
+# Once: a static git for the task images that ship none (9 of the 26 tasks).
+sh scripts/build-static-git.sh static-git/git
+
+export ANTHROPIC_API_KEY=... EXA_API_KEY=...
+python examples/openworldengineer/make_jobs.py --model anthropic/claude-opus-5 \
+  --reasoning-effort max --static-git static-git/git --env modal --out owe-runs \
+  path/to/OpenWorldEngineer/tasks/*
+# It prints a `harbor run -c owe-runs/jobs/<task>.json` command for each task.
+```
+
+Each job runs 8 attempts of `owe_agent:OpenWorldEngineerHarness`, which is the harness
+plus the leaderboard's system-prompt ending: a `## Web access` section saying whether the
+model has the web tools. Its options are, in order (later wins):
+
+- the runner's defaults: `large_input_exclude_mb = 100`, `large_input_total_mb = 256`,
+  `sandbox_limits` from the task's `[environment]`, `static_git_path`, and
+  `llm_call_kwargs = {"_skip_mcp_handler": true}`;
+- the task's `[agent.openworld]` table, if any;
+- your options: `reasoning_effort`, `web_snapshot_as_of = "2026-10-01"` (the snapshot
+  every leaderboard run searched; `--no-web` drops it), and any `--ak KEY=VALUE`.
+
+`time_budget_sec` is the task's `[agent].timeout_sec`, and Harbor's hard agent timeout
+is `hard_timeout_sec` of the options. The job runs a copy of the task under
+`owe-runs/tasks/` whose agent phase has no network (`[agent] network_mode =
+"no-network"`). Its files are hard links to the task's (full copies across
+filesystems), except the rewritten `task.toml` and a marker file. As on the
+leaderboard, the web tools are then the agent's only way out of the sandbox. Use the
+reasoning effort the leaderboard lists for the model. Model keys and `EXA_API_KEY` are
+read from the shell that runs Harbor.
+
+- The leaderboard ran on Modal. Harbor's Docker environment allocates no GPUs, so with
+  `--env docker` (the default) the 7 GPU tasks are skipped. On Docker, Harbor enforces
+  the offline phase with an nftables egress filter and refuses to start a trial when
+  the Docker host's kernel lacks it. Several trials at once on one host also add
+  timing noise to the tasks scored on speed.
+- Tasks without `tests/` keep their grader private, so they are skipped;
+  `--allow-ungraded` runs them with verification off. The OpenWorldEngineer README
+  lists them and explains why public-split scores are not comparable with leaderboard
+  scores. `dbf-aircraft-design` also needs a tools image that is not public.
+- A job's name holds the task, the model and the web arm. Running the same job again
+  resumes it, so give a changed configuration its own `--out`.
+- Some models needed more options than these, which the leaderboard passed per model:
+  streaming and request settings for a gateway, `model_info`, or a provider's beta
+  header. A few models ran through a private LLM gateway. Trials lost to
+  infrastructure failures (a sandbox that died, a provider outage) were rerun, or
+  regraded from their exported submission, rather than counted.
+
 ## Limits
 
 - Requires Harbor `0.23.0` and Python 3.12+. Upstream was tested on Python
@@ -342,16 +409,17 @@ excludes. Invalid options raise `ValueError` before any sandbox starts.
   itself is not patched.
 - No MCP servers, Harbor skills, session resume or handoff; tasks configuring MCP
   servers or skills fail at setup.
-- Reproducing a published score needs the original model configuration.
+- Reproducing a published score needs the original model configuration (see
+  [Reproducing OpenWorldEngineer runs](#reproducing-openworldengineer-runs)).
 
 ## Development
 
 ```sh
 uv sync --locked
 uv run pytest -q          # offline: fake providers, temporary Git repos
-uv run --locked ruff check src tests scripts
-uv run --locked ruff format --check src tests scripts
-uv build && uv run python scripts/verify_wheel.py dist/openworld_harness-0.2.0-py3-none-any.whl
+uv run --locked ruff check src tests scripts examples
+uv run --locked ruff format --check src tests scripts examples
+uv build && uv run python scripts/verify_wheel.py dist/openworld_harness-*.whl
 ```
 
 `verify_wheel.py` reruns the suite against the installed wheel outside the
@@ -361,8 +429,8 @@ checkout; `--litellm-version 1.97.0` checks the lower bound.
 We use ruff.
 
 ```sh
-uv run --locked ruff check --fix src tests scripts
-uv run --locked ruff format src tests scripts
+uv run --locked ruff check --fix src tests scripts examples
+uv run --locked ruff format src tests scripts examples
 ```
 
 Licensed under Apache-2.0; see [LICENSE](LICENSE) and [NOTICE](NOTICE).

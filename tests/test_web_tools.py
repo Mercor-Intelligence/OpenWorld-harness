@@ -1121,7 +1121,7 @@ async def test_notes_reorganize_count_in_cost_and_survive_compaction(
     assert trajectory["steps"][-1]["message"] == handoff
 
 
-# ----- platform wiring -----
+# ----- runner wiring -----
 
 
 async def test_web_is_off_without_a_cutoff(

@@ -1,10 +1,10 @@
 """``web_search`` and ``web_fetch`` over Exa Snapshot, on when ``web_snapshot_as_of``
 is set; without it the agent is the plain core.
 
-Ported from the RWE eval platform's WebProximus. The cutoff stays on the host: no
-tool description, result, error or note names it, Exa's own error text goes only
-to the logs, and published dates are hidden unless ``web_show_dates`` is set. The
-tools run in the runner process, so ``EXA_API_KEY`` never enters the sandbox.
+The cutoff stays on the host: no tool description, result, error or note names
+it, Exa's own error text goes only to the logs, and published dates are hidden
+unless ``web_show_dates`` is set. The tools run in the runner process, so
+``EXA_API_KEY`` never enters the sandbox.
 
 The search loop follows the CGDP framing in ``cgdp``: the belief state (research
 notes) comes back with web results whenever it changes and is carried across

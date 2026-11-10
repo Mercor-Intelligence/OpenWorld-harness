@@ -81,7 +81,7 @@ FIELD_VALUES: dict[str, Any] = {
     "reasoning_effort": "high",
     "api_key_env": "PROXIMUS_TIER0_KEY",
     "workspace_git_excludes": ["node_modules", "target"],
-    "static_git_path": "/opt/rwe-eval/git",
+    "static_git_path": "/opt/static-git/git",
     "large_input_exclude_mb": 100,
     "large_input_total_mb": 256,
     "sandbox_limits": {"cpus": 8, "memory_mb": 32768, "gpus": 1, "gpu_type": "H100"},

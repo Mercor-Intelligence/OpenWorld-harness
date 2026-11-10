@@ -1,4 +1,4 @@
-"""Fixes from the RWE 735c43a sweep (RWE-eval-platform HARNESS_ISSUES.md).
+"""Fixes from a three-model evaluation sweep (0.3.0; ids as in its commit message).
 
 - H10: a provider refusal withholds the newest tool output once, then ends the
   run normally so the restored winner is graded.
@@ -483,7 +483,7 @@ def real_repo(tmp_path: Path, monkeypatch):
 
 
 def rebuild(image_state: Path, export: Path, into: Path) -> dict[str, str]:
-    """What the platform's replay does in a fresh copy of the task image."""
+    """What a runner's replay regrade does in a fresh copy of the task image."""
     shutil.copytree(image_state, into, ignore=shutil.ignore_patterns(".git"))
     subprocess.run(["tar", "-xf", str(export / "sub.tar"), "-C", str(into)], check=True)
     for path in (export / "deleted.z").read_bytes().split(b"\0"):

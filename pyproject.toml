@@ -1,6 +1,6 @@
 [project]
 name = "openworld-harness"
-version = "0.3.2"
+version = "0.3.2.post1"
 description = "OpenWorld-harness: a long-horizon coding agent for upstream Harbor, forked from Proximus."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -66,5 +66,5 @@ select = ["E4", "E7", "E9", "F", "I"]
 
 [tool.uv]
 exclude-newer = "7 days"
-# The litellm the platform runs, whose routing the request code relies on.
+# The litellm the OpenWorldEngineer runs used, whose routing the request code relies on.
 constraint-dependencies = ["litellm==1.106.2"]

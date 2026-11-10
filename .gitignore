@@ -24,3 +24,5 @@ logs/
 /scripts/check_pi_ruff.mjs
 /scripts/check_ruff.el
 /scripts/ruff-on-save.el
+owe-runs/
+static-git/
