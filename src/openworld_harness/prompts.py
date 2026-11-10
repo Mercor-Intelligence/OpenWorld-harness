@@ -173,9 +173,8 @@ EMPTY_RESPONSE_MESSAGE = (
 
 
 def toolless_loop_message(n: int, left: int | None, *, armed: bool) -> str:
-    """Closes a prose turn once a long run of turns had no tool call (in the
-    pass@8 sweep a model repeated one sentence ~1,000 times, never calling
-    submit). ``n``: turns in a row without a tool call, this one included;
+    """Closes a prose turn once a long run of turns had no tool call (a model
+    has repeated one sentence ~1,000 times, never calling submit). ``n``: turns in a row without a tool call, this one included;
     ``left``: such turns left before the run ends (None: no limit);
     ``armed``: a submission awaits confirmation."""
     text = (

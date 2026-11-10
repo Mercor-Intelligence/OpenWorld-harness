@@ -1,9 +1,10 @@
-"""Fixes from the pass@8 sweep (~/pass8-loss-20261102/HARNESS_FIXES.md).
+"""Fixes for failures seen in long multi-model evaluation runs.
 
 - A response the provider's output filter blanked (finish reason
   content_filter, no text, no tool call) is sent again, not counted as an
   empty model turn; persistent filtering takes the refusal path and ends the
-  run as a graded provider failure. 48/316 Gemini runs ended as stalls on it.
+  run as a graded provider failure. Counted as empty turns, they ended some
+  Gemini runs as stalls.
 """
 
 import logging

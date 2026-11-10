@@ -207,8 +207,8 @@ class ProviderContentFilterError(RuntimeError):
     raised for Anthropic models, whose "refusal" maps to it as well). Not a
     model turn: the request is sent again, up to ``content_filter_attempts``
     times, then ``LLM.query`` raises ``ProviderRefusalError`` with code
-    ``content_filter``. In the pass@8 sweep, counting these as empty turns ended
-    15% of Gemini runs as stalls. ``parsed`` carries the billed usage;
+    ``content_filter``. Counted as empty turns, they ended some Gemini runs as
+    stalls. ``parsed`` carries the billed usage;
     ``details`` the provider's safety/citation data, as text."""
 
     def __init__(self, parsed: "ParsedResponse", details: str = ""):
@@ -243,8 +243,8 @@ class ProviderRefusalError(RuntimeError):
 
 
 # Error codes of provider policy refusals that LiteLLM leaves as a plain
-# BadRequestError. OpenAI's `cyber_policy` ended a 9.96 h lvgl run; its
-# `invalid_prompt` fires nondeterministically, so a replay can pass.
+# BadRequestError. OpenAI's `cyber_policy` can end a long run on benign work;
+# its `invalid_prompt` fires nondeterministically, so a replay can pass.
 _REFUSAL_CODES = ("cyber_policy", "invalid_prompt", "content_policy_violation")
 # Refused attempts of one request before ProviderRefusalError.
 REFUSAL_ATTEMPTS = 3

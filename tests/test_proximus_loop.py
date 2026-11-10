@@ -714,8 +714,8 @@ async def test_text_only_turns_are_neither_nagged_nor_terminal(tmp_path, monkeyp
 
 
 # ----- tool-less turn cap -----
-# A model can answer "Continue." with prose forever (pass@8: 1,554 and 1,080
-# nudges, $739 and $486). The first toolless_nudge_after prose turns keep the
+# A model can answer "Continue." with prose forever, for over a thousand turns
+# in a run. The first toolless_nudge_after prose turns keep the
 # neutral closer; later ones name the ways on; toolless_turn_limit ends the run
 # like a time-out (exit submit + restore, graded).
 
@@ -2850,7 +2850,7 @@ async def test_confirmed_submit_never_auto_pins_a_new_winner(tmp_path, monkeypat
 
 STOPPED = (
     "executing processes for container: cannot execute in container "
-    '"ta-01M64JTB2H96QMJ9XX335DNVQV" in state stopped'
+    '"ta-0000000000000000000000TEST" in state stopped'
 )
 
 

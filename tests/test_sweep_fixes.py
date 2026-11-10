@@ -1,4 +1,4 @@
-"""Fixes from a three-model evaluation sweep (0.3.0; ids as in its commit message).
+"""Fixes from a three-model evaluation sweep (ids as in the commit that added them).
 
 - H10: a provider refusal withholds the newest tool output once, then ends the
   run normally so the restored winner is graded.

@@ -12,8 +12,8 @@ A host-side poller (``start_polling``) also reads the loop's events and a
 memory sample every ``POLL_INTERVAL_SEC``, whatever the model is doing: the
 counter and its parts, the largest processes and process groups, tmpfs use and
 (on GPU sandboxes) GPU memory. Samples live on the host, so when the sandbox
-dies the last minutes before the death are kept (pass@8: 15 GPU sandboxes died
-of OOM with the watchdog silent, and nothing told why).
+dies the last minutes before the death are kept (a sandbox can die of OOM with
+the watchdog silent, and nothing else tells why).
 """
 
 from __future__ import annotations

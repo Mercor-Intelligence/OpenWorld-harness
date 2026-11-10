@@ -4,8 +4,8 @@ Modifications copyright 2026 Mercor
 OpenWorld-harness is a modified version of Proximus (harbor-proximus) by
 Proximal AI, Inc. (https://github.com/Proximal-Labs/proximus), forked at commit
 a989f7b. Mercor changed files under src/, tests/, scripts/, examples/ and
-.github/, and the project metadata; "Changes from Proximus" in README.md and the
-git history describe the changes. The original notice follows.
+.github/ and the project metadata, and added docs/; the git history describes the
+changes. The original notice follows.
 
 Proximus (harbor-proximus)
 Copyright 2026 Proximal AI, Inc.

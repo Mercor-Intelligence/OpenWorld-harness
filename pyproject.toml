@@ -1,6 +1,6 @@
 [project]
 name = "openworld-harness"
-version = "0.3.2.post1"
+version = "0.0.1"
 description = "OpenWorld-harness: a long-horizon coding agent for upstream Harbor, forked from Proximus."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -27,7 +27,7 @@ build-backend = "hatchling.build"
 packages = ["src/openworld_harness"]
 
 [tool.hatch.build.targets.sdist]
-include = ["/src", "/tests", "/scripts", "/examples", "/README.md", "/pyproject.toml", "/LICENSE", "/NOTICE", "/uv.lock"]
+include = ["/src", "/tests", "/scripts", "/examples", "/docs", "/README.md", "/pyproject.toml", "/LICENSE", "/NOTICE", "/uv.lock"]
 
 [dependency-groups]
 dev = [

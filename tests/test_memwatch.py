@@ -587,7 +587,7 @@ def test_scripts_parse_under_dash():
         assert result.returncode == 0, result.stderr
 
 
-# ----- pass@8: host-side poller, samples, peak, GPU wording -----
+# ----- host-side poller, samples, peak, GPU wording -----
 
 SAMPLE_OUT = "\n".join(
     [
@@ -779,7 +779,7 @@ async def test_real_poll_reads_the_loop_and_the_processes(tmp_path, victims):
 
 
 def test_gpu_sandboxes_get_the_same_memory_wording():
-    # The pass@8 probe: on Modal the counter sees pinned memory and CUDA
+    # Probed on Modal: the counter sees pinned memory and CUDA
     # contexts, and the GPU "OOM" deaths were preemptions.
     gpu = sandbox_limits_note({"memory_mb": 65536, "gpus": 1}, watchdog=True)
     cpu = sandbox_limits_note({"memory_mb": 65536}, watchdog=True)

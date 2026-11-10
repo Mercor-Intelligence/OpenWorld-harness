@@ -1506,7 +1506,7 @@ wheels = [
 
 [[package]]
 name = "openworld-harness"
-version = "0.3.2.post1"
+version = "0.0.1"
 source = { editable = "." }
 dependencies = [
     { name = "harbor" },

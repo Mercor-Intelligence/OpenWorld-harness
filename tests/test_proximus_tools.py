@@ -643,7 +643,7 @@ class TestRaiseIfEnvironmentGone:
                 "modal.exception",
                 Exception,
                 "executing processes for container: cannot execute in container "
-                '"ta-01M64JTB2H96QMJ9XX335DNVQV" in state stopped',
+                '"ta-0000000000000000000000TEST" in state stopped',
             ),
         ],
     )
@@ -674,10 +674,10 @@ class TestRaiseIfEnvironmentGone:
         raise_if_environment_gone(_provider_error(name, module))
 
 
-# Verbatim from a gpt-6.1-sol sweep trial whose sandbox had been killed.
+# Modal's reply to an exec in a sandbox that has been killed (placeholder id).
 STOPPED = (
     "executing processes for container: cannot execute in container "
-    '"ta-01M64JTB2H96QMJ9XX335DNVQV" in state stopped'
+    '"ta-0000000000000000000000TEST" in state stopped'
 )
 
 

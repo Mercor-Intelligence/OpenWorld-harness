@@ -116,7 +116,7 @@ class ProximusConfig(AgentOptions):
     """End the run after this many turns in a row without a tool call, like a
     time-out: the exit submit and restore run and the winner is graded
     (``ended_by`` is ``prose_loop``). 0: no limit. The longest legitimate run
-    seen across 1,288 pass@8 trials was 32."""
+    of such turns seen in long evaluation runs was 32."""
 
     enable_summarize: bool = True
     """Summarize the conversation when it nears the context limit. When off, a
