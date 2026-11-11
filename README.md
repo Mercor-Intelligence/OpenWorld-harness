@@ -8,7 +8,7 @@
 
 OpenWorld-harness is the agent harness behind
 [OpenWorldEngineer](https://openworldengineer.mercor.com), a benchmark of long-horizon
-engineering and research tasks. It is a coding agent packaged as an external agent for
+engineering and research tasks. It is an extension of [Proximus](https://github.com/Proximal-Labs/proximus) and is a coding agent packaged as an external agent for
 [Harbor](https://pypi.org/project/harbor/): it runs a LiteLLM tool loop on the host and
 acts in the sandbox only through Harbor's environment interface, so it works with any
 Harbor environment (Docker, Modal, ...).
