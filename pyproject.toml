@@ -1,0 +1,70 @@
+[project]
+name = "openworld-harness"
+version = "0.0.1"
+description = "OpenWorld-harness: a long-horizon coding agent for upstream Harbor, forked from Proximus."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+authors = [{ name = "Proximal AI, Inc." }, { name = "Mercor" }]
+license-files = ["LICENSE", "NOTICE"]
+dependencies = [
+    "harbor==0.23.0",
+    # litellm 1.107.0 was a malicious release. The mcp extra: litellm imports
+    # mcp on its Responses path (gpt-5.4+ with tools) even when no MCP tool is
+    # used; without it every such request fails as a connection error.
+    "litellm[mcp]>=1.97.0,<2,!=1.107.0",
+    "pydantic>=2.11.7,<3",
+    "tenacity>=9.1.2,<10",
+    "pillow>=10",
+    "httpx>=0.27,<1",
+]
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/openworld_harness"]
+
+[tool.hatch.build.targets.sdist]
+include = ["/src", "/tests", "/scripts", "/examples", "/docs", "/README.md", "/pyproject.toml", "/LICENSE", "/NOTICE", "/uv.lock"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4.2",
+    "pytest-asyncio>=1.2",
+    "ruff>=0.15.17",
+    "pillow>=10",
+    "httpx>=0.27",
+    "pyright>=1.1.414",
+]
+
+[tool.pyright]
+include = ["src", "tests", "scripts"]
+venvPath = "."
+venv = ".venv"
+pythonVersion = "3.12"
+typeCheckingMode = "basic"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = ["unit: offline unit tests"]
+addopts = "--strict-markers --strict-config"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+unsafe-fixes = false
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.uv]
+exclude-newer = "7 days"
+# The litellm the OpenWorldEngineer runs used, whose routing the request code relies on.
+constraint-dependencies = ["litellm==1.106.2"]

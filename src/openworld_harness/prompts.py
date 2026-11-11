@@ -1,0 +1,393 @@
+"""Every model-facing string Proximus injects"""
+
+from pathlib import Path
+from typing import Any
+
+from harbor.models.task.config import NetworkMode
+
+from openworld_harness import utils
+from openworld_harness.timer import DEADLINE_PATH
+
+SUMMARY_REQUEST = """Context checkpoint (routine context management; the task is not paused or finished). Your earlier messages are about to be replaced by the handoff summary you write now, and you will continue the task immediately afterwards with the same tools and the remaining time budget, without this conversation history. Write a comprehensive handoff summary of your work so far. Cover:
+1. Major actions completed and their outcomes.
+2. Key findings: important file paths, commands, configurations, error messages, measurements.
+3. Files created or modified so far, and the role of each.
+4. Current status: what is verified working, what is in progress.
+5. Precise next steps, with rationale.
+6. Pitfalls to avoid.
+Be specific and factual. Reply with the summary only; do not call any tools in this reply."""
+
+HANDOFF_HEADER = (
+    "[Context compacted] Your earlier conversation history was summarized to "
+    "free context space."
+)
+PROGRESS_FILE = Path("/tmp/proximus/PROGRESS.md")
+HANDOFF_FOOTER = (
+    f"Before acting: read {PROGRESS_FILE} and inspect the current "
+    "state of the filesystem (e.g. `git log`, recently modified files). Do "
+    "not redo completed work. Continue the task."
+)
+
+SUBMIT_TIME_LEFT = (
+    "{remaining} of your {budget} time budget remains ({percent_left}% left)."
+)
+
+SUBMIT_CONTINUE_OR_CONFIRM = (
+    "You can continue working and submit again later to record an improved "
+    "result — later work never overwrites a recorded submission, and if the "
+    "sandbox itself dies (for example by running out of memory), the run ends "
+    "and your latest recorded submission is graded (you will be told if a "
+    "submission could not be saved for that). If you are "
+    "certain nothing more can be gained, call submit again as your ONLY "
+    "action in your next message to confirm this as your final submission "
+    "and end the run; any other tool call cancels the pending confirmation."
+)
+
+SUBMIT_CONFIRMED = "Final submission confirmed. Ending the session."
+
+
+def export_failed_note(index: int, reason: str, *, too_large: bool = False) -> str:
+    """Appended to the next tool result when submission #index could not be
+    copied off the sandbox (so a sandbox death would lose it)."""
+    for marker in ("[stderr]", "[stdout]"):
+        reason = reason.replace(marker, " ")
+    reason = " ".join(reason.split())
+    if len(reason) > 200:
+        reason = reason[:197] + "..."
+    note = (
+        f"(Note: submission #{index} is recorded and will be graded normally, "
+        "but it could NOT be saved off the sandbox for a regrade "
+        f"({reason}). If the sandbox dies, that submission is lost."
+    )
+    if too_large:
+        note += (
+            " A submit without your own commit snapshots every changed file "
+            "under the workspace, scratch files included: commit only your "
+            "deliverables first (keep scratch data in .gitignore or outside the "
+            "workspace), then submit again."
+        )
+    return note + ")"
+
+
+SUBMIT_FALLBACK = (
+    "The final workspace state at the end of the run will be used as your "
+    "result instead."
+)
+
+# A failed submit records nothing, so it never offers to end the run.
+SUBMIT_RETRY = (
+    "Nothing was recorded by this call and the run continues; fix the problem "
+    "and call submit again."
+)
+
+# Deliberately says NOTHING about multiple submissions or the two-submit ending:
+# revealing those up front telegraphs that submissions can be revised, which we
+# want the model to discover only when it submits (the continue-or-confirm nudge
+# and the disarm note carry the full contract from that moment on).
+SUBMIT_GUIDANCE = """\
+- When your work is ready, record it with `submit`. A commit is optional: omit it and the harness commits the current workspace state for you, uncommitted changes included; or pass a commit that already exists in the workspace repository.
+- Grading restores your latest submitted commit and then scores the workspace filesystem.
+- Do not stop early. Keep improving while meaningful time remains."""
+
+# Exactly one timer bullet renders: the deadline file _arm_timer writes,
+# or the task's own clock when config.task_provides_timer is set.
+DEADLINE_GUIDANCE = (
+    f"- With a budget set, `{DEADLINE_PATH}` holds the Unix epoch second "
+    f"the run ends: `echo $(( $(cat {DEADLINE_PATH}) - $(date +%s) ))` "
+    "prints the whole seconds left at any time."
+)
+
+TASK_TIMER_GUIDANCE = (
+    "- The task environment provides its own timer; check the remaining "
+    "time the way the task instruction describes."
+)
+
+OUTPUT_LENGTH_MESSAGE = (
+    "Your previous response exceeded the maximum output length and was "
+    "discarded. Re-issue it in smaller pieces: shorter messages, smaller "
+    "edits, fewer tool calls per turn."
+)
+
+# The provider's own error, verbatim, plus the one fact the model cannot
+# infer: the harness evicted the newest attached image to make room.
+REQUEST_TOO_LARGE_MESSAGE = (
+    "Request failed: {error}\n"
+    "The most recently attached image was removed from the conversation."
+)
+
+# Replaces each tool output of the newest turn after a provider refusal.
+WITHHELD_OUTPUT = (
+    "[Output withheld: the model provider refused a request that contained it.]"
+)
+
+PROVIDER_REFUSAL_MESSAGE = (
+    "The model provider refused the last request. The output of your most "
+    "recent tool call(s) was withheld from the conversation; the sandbox is "
+    "unchanged. Continue the task."
+)
+
+
+def content_filter_message(*, withheld: bool) -> str:
+    """After a request's responses were blanked by the provider's output
+    filter ``content_filter_attempts`` times in a row."""
+    text = (
+        "The model provider's content filter blocked your last replies, so "
+        "nothing from them was kept."
+    )
+    if withheld:
+        text += (
+            " The output of your most recent tool call(s) was withheld from the "
+            "conversation in case it set off the filter."
+        )
+    return text + " The sandbox is unchanged. Continue the task."
+
+
+INVALID_IMAGE_MESSAGE = (
+    "Request failed: {error}\n"
+    "The provider rejected the most recently attached image, so its payload "
+    "was removed from the conversation. Fix the source image according to "
+    "the provider's stated requirements, then call `view_image` again."
+)
+
+# Closes every text-only assistant turn (Anthropic rejects a conversation
+# ending in an assistant message). Deliberately neutral: prose turns are
+# legitimate work and must not be nagged (an early nag pushes reasoning out of
+# prose). Only a long unbroken run of them gets toolless_loop_message.
+CONTINUE_MESSAGE = "Continue."
+
+# While a submission awaits confirmation a bare "Continue." reads as "do
+# more work", so this one state names the confirm path.
+CONTINUE_OR_CONFIRM_MESSAGE = (
+    "Continue. If instead nothing more can be gained, call `submit` again "
+    "now to confirm your recorded submission and end the run."
+)
+
+# Closes a turn that produced nothing at all. Unlike prose turns this one
+# IS nagged: a bare "Continue." never breaks the pattern, and after
+# EMPTY_TURN_STALL_LIMIT of these the run dies with no submission.
+EMPTY_RESPONSE_MESSAGE = (
+    "Your previous response was empty. Reply with a tool call, or a short "
+    "note on what you are doing next. If you consider the task complete, "
+    "call `submit`."
+)
+
+
+def toolless_loop_message(n: int, left: int | None, *, armed: bool) -> str:
+    """Closes a prose turn once a long run of turns had no tool call (a model
+    has repeated one sentence ~1,000 times, never calling submit). ``n``: turns in a row without a tool call, this one included;
+    ``left``: such turns left before the run ends (None: no limit);
+    ``armed``: a submission awaits confirmation."""
+    text = (
+        f"Continue. Your last {n} replies had no tool call, and only tool calls "
+        "do work in the sandbox."
+    )
+    if armed:
+        text += (
+            " Make a tool call now, or, if nothing more can be gained, call "
+            "`submit` again now to confirm your recorded submission and end "
+            "the run."
+        )
+    else:
+        text += (
+            " Make a tool call now. If nothing more can be gained, call "
+            "`submit` to record your work; calling `submit` again right after "
+            "it ends the run."
+        )
+    if left is not None:
+        text += (
+            f" After {left} more {'reply' if left == 1 else 'replies'} without "
+            "a tool call, the run ends and your latest recorded submission is "
+            "graded."
+        )
+    return text
+
+
+def system_prompt(task_provides_timer: bool = False) -> str:
+    """Render the system template with submit, timer, and durable-notes
+    guidance."""
+    template = utils.read_template("system.md")
+    timer_line = TASK_TIMER_GUIDANCE if task_provides_timer else DEADLINE_GUIDANCE
+    return (
+        template.replace("{{SUBMIT_GUIDANCE}}", SUBMIT_GUIDANCE)
+        .replace("{{TIMER_GUIDANCE}}", timer_line)
+        .replace("{{ARTIFACT_GUIDANCE}}", "")
+        .replace("{{PROGRESS_FILE}}", str(PROGRESS_FILE))
+    )
+
+
+def initial_user_message(
+    instruction: str,
+    workdir: str,
+    budget_sec: float | None,
+    network_mode: NetworkMode,
+) -> str:
+    message = (
+        f"Task instruction:\n\n{instruction}"
+        f"\n\nThe working directory for this task is {workdir} "
+        "(bash commands run there by default). Do your work there "
+        "unless the task says otherwise."
+    )
+    if budget_sec:
+        message += (
+            f"\n\nYou have a total time budget of "
+            f"{fmt_duration(budget_sec)} for this task."
+        )
+    note = _network_note(network_mode)
+    if note:
+        message += f"\n\n{note}"
+    return message
+
+
+def _network_note(mode: NetworkMode) -> str | None:
+    """Restricted network access described up front, so the model does not
+    waste turns on installs that cannot succeed; public access gets None."""
+    if mode == NetworkMode.NO_NETWORK:
+        return (
+            "This sandbox has no internet access. Do not attempt to "
+            "install packages or download anything; work with what is "
+            "already present."
+        )
+    if mode == NetworkMode.ALLOWLIST:
+        return (
+            "Internet access is restricted to a small allowlist; assume "
+            "package installs and downloads will fail."
+        )
+    return None
+
+
+def handoff_message(
+    instruction: str,
+    summary: str | None,
+    progress: str | None,
+    elapsed: float,
+    budget: float | None,
+    *,
+    submissions: str | None = None,
+) -> str:
+    """The compaction boundary message: header, original instruction, model
+    summary, durable notes, the recorded submissions (the harness's own list,
+    which outranks anything the summary says about them), remaining budget,
+    footer."""
+    parts = [
+        HANDOFF_HEADER,
+        f"Original task instruction:\n\n{instruction}",
+        "Handoff summary of the work completed so far:\n\n"
+        + (
+            summary
+            or f"(summary unavailable — rely on {PROGRESS_FILE} "
+            "and the state of the filesystem)"
+        ),
+    ]
+    if progress:
+        parts.append(
+            f"Your durable notes, re-read from {PROGRESS_FILE} at the "
+            f"compaction boundary:\n\n{progress}"
+        )
+    if submissions:
+        parts.append(
+            "Recorded submissions (the harness's record; it outranks the summary "
+            f"above):\n\n{submissions}"
+        )
+    if budget:
+        remaining = max(0.0, budget - elapsed)
+        parts.append(
+            f"Time budget: about {fmt_duration(remaining)} of "
+            f"{fmt_duration(budget)} remain "
+            f"({round(100 * remaining / budget)}% left)."
+        )
+    parts.append(HANDOFF_FOOTER)
+    return "\n\n".join(parts)
+
+
+def time_left(elapsed: float, budget: float | None) -> str | None:
+    """The time-left sentence, or None without a budget."""
+    if not budget:
+        return None
+    remaining = max(0.0, budget - elapsed)
+    return SUBMIT_TIME_LEFT.format(
+        remaining=fmt_duration(remaining),
+        budget=fmt_duration(budget),
+        percent_left=round(100 * remaining / budget),
+    )
+
+
+def submit_guidance(elapsed: float, budget: float | None) -> str:
+    """Continue-or-confirm guidance for a non-final submit, with the
+    time-left sentence when a budget exists."""
+    left = time_left(elapsed, budget)
+    return (
+        f"{left} {SUBMIT_CONTINUE_OR_CONFIRM}" if left else SUBMIT_CONTINUE_OR_CONFIRM
+    )
+
+
+def submission_note(n: int, commit: str, subject: str) -> str:
+    subject_clause = f' ("{subject}")' if subject else ""
+    return f"Submission #{n} recorded from commit {commit[:12]}{subject_clause}."
+
+
+def submission_failed(detail: str, winner: int = 0) -> str:
+    """With an earlier recorded submission (``winner``, its list_submissions
+    number) the result is that commit, not the final workspace state — the
+    fallback sentence must stay truthful."""
+    if winner:
+        return (
+            f"Submission could not be recorded ({detail}). Your previous "
+            f"submission (#{winner}) remains your recorded result."
+        )
+    return f"Submission could not be recorded ({detail}). {SUBMIT_FALLBACK}"
+
+
+def submission_retry(
+    detail: str, winner: int, elapsed: float, budget: float | None
+) -> str:
+    """A submit that failed to record: what failed, what stays recorded, that
+    the run continues, and the time left."""
+    parts = [submission_failed(detail, winner), SUBMIT_RETRY]
+    left = time_left(elapsed, budget)
+    if left:
+        parts.append(left)
+    return " ".join(parts)
+
+
+def submissions_list(rows: list[dict[str, Any]], winner: int | None) -> str:
+    """One line per submit call, newest last, with the currently scored row
+    (``Submissions.winner_index``) marked."""
+    if not rows:
+        return (
+            "No submissions recorded yet. If you never submit, the workspace "
+            "state at the end of the run is your result."
+        )
+    lines = []
+    for row in rows:
+        line = f"#{row['index']}  {(row.get('hash') or '')[:12] or '????'}"
+        line += f"  at {fmt_duration(row.get('elapsed_sec') or 0)} into the run"
+        if row.get("description"):
+            line += f'  "{row["description"]}"'
+        if not row.get("ok"):
+            line += "  (failed; not recorded)"
+        if row["index"] == winner:
+            line += "  <- current result"
+        lines.append(line)
+    lines.append(
+        "The most recent successful submission is kept as your result."
+        if winner is not None
+        else "No successful submissions yet; the final workspace state "
+        "would be scored instead."
+    )
+    return "\n".join(lines)
+
+
+def fmt_duration(secs: float) -> str:
+    """Render a non-negative duration using at most two abbreviated units
+    (e.g. ``2h 30m``, ``45m 10s``, ``50s``)."""
+    rounded = int(max(0.0, secs) + 0.5)
+    hours, remainder = divmod(rounded, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        units = ((hours, "h"), (minutes, "m"))
+    elif minutes:
+        units = ((minutes, "m"), (seconds, "s"))
+    else:
+        units = ((seconds, "s"),)
+    units = tuple(u for u in units if u[0]) or ((0, "s"),)
+    return " ".join(f"{value}{suffix}" for value, suffix in units)
