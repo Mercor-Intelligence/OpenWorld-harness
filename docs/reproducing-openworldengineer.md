@@ -46,10 +46,9 @@ read from the shell that runs Harbor.
   the offline phase with an nftables egress filter and refuses to start a trial when
   the Docker host's kernel lacks it. Several trials at once on one host also add
   timing noise to the tasks scored on speed.
-- Tasks without `tests/` keep their grader private, so they are skipped;
-  `--allow-ungraded` runs them with verification off. The
-  [dataset card](https://huggingface.co/datasets/mercor/OpenWorldEngineer) lists them
-  and explains why public-split scores are not comparable with leaderboard scores. `dbf-aircraft-design` also needs a tools image that is not public.
+- Every task ships the leaderboard verifier and its held-out test data in `tests/`, so
+  runs are graded the same way as the leaderboard. `dbf-aircraft-design` builds its tools
+  service from `environment/tools/` through its `docker-compose.yaml`.
 - A job's name holds the task, the model and the web arm. Running the same job again
   resumes it, so give a changed configuration its own `--out`.
 - Some models needed more options than these, which the leaderboard passed per model:
