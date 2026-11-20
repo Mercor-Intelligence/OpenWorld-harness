@@ -315,6 +315,26 @@ def is_responses_unknown_item_error(error: BaseException) -> bool:
     return "unknown items in responses api response" in _error_text(error)
 
 
+# The text a LiteLLM proxy puts in the 400 it returns for a call that ran out
+# of time.
+_PROXIED_TIMEOUT_MARKER = "litellm.timeout"
+
+
+def is_proxied_timeout_error(error: BaseException) -> bool:
+    """A call that timed out behind a LiteLLM proxy comes back as a
+    BadRequestError whose message carries the proxy's ``litellm.Timeout``:
+    "litellm.BadRequestError: OpenAIException - litellm.Timeout: Connection
+    timed out. Timeout passed=120.0". A timeout raised in this process is
+    ``litellm.Timeout`` and is already retried; this is the same failure one
+    hop further away. It matters most at the end of a budget, where
+    ``_acompletion`` gives a call only BUDGET_MARGIN_SEC: a fatal error there
+    fails the run, while a retryable one lets ``Proximus`` end it on the
+    budget and grade the restored winner."""
+    return isinstance(
+        error, litellm.exceptions.BadRequestError
+    ) and _PROXIED_TIMEOUT_MARKER in _error_text(error)
+
+
 def _is_retryable(error: BaseException) -> bool:
     """Provider refusals (ContentPolicyViolationError, and the plain
     BadRequestErrors in ``_REFUSAL_CODES``) are retryable despite subclassing
@@ -350,6 +370,9 @@ def _is_retryable(error: BaseException) -> bool:
         # the response's retryDelay (e.g. "14.403979925s") contains "403" and
         # litellm's `elif "403" in error_str` fires before its quota branch.
         # These are rate limits — exactly what the jittered retry exists for.
+        return True
+    if is_proxied_timeout_error(error):
+        # A timeout behind a LiteLLM proxy arrives as a 400.
         return True
     if is_request_too_large_error(error):
         # Deterministic for a given history (verbatim replays carry the same

@@ -732,3 +732,62 @@ def test_a_failing_reasoning_restore_keeps_litellms_choices(monkeypatch, caplog)
     (choice,) = convert([*items, answer])
     assert choice.message.content == "113"
     assert "Could not restore the reasoning items" in caplog.text
+
+
+def _proxied_timeout() -> LiteLLMBadRequestError:
+    """What a LiteLLM proxy returns for a call that ran out of time: a 400,
+    not a litellm.Timeout (an OpenWorldEngineer run's last call of its budget,
+    behind Atlas's LLM gateway)."""
+    return LiteLLMBadRequestError(
+        message=(
+            "OpenAIException - litellm.Timeout: Connection timed out. Timeout "
+            "passed=130.0, time taken=131.005 seconds"
+        ),
+        model="gemini-4-neon",
+        llm_provider="openai",
+    )
+
+
+def test_a_timeout_behind_a_proxy_is_retried_like_one_raised_here():
+    """Retryable is also what lets a budget that ends on it be graded rather
+    than failed (Proximus's provider-retry branch)."""
+    from litellm.exceptions import Timeout as LiteLLMTimeout
+
+    from openworld_harness.llm import _is_retryable, is_proxied_timeout_error
+
+    assert is_proxied_timeout_error(_proxied_timeout()) is True
+    assert _is_retryable(_proxied_timeout()) is True
+    assert (
+        _is_retryable(
+            LiteLLMTimeout(message="timed out", model="gpt-5.4", llm_provider="openai")
+        )
+        is True
+    )
+    plain = LiteLLMBadRequestError(
+        message="malformed request", model="gpt-5.4", llm_provider="openai"
+    )
+    assert is_proxied_timeout_error(plain) is False
+    assert _is_retryable(plain) is False
+
+
+@pytest.mark.asyncio
+async def test_a_call_that_timed_out_behind_a_proxy_is_sent_again(monkeypatch):
+    llm = _llm()
+    calls = {"n": 0}
+
+    async def fake_acompletion(messages, tools):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise _proxied_timeout()
+        return "recovered"
+
+    monkeypatch.setattr(llm, "_acompletion", fake_acompletion)
+    monkeypatch.setattr(
+        llm, "_parse_response", lambda r: ParsedResponse(content=str(r), tool_calls=[])
+    )
+    monkeypatch.setattr("tenacity.wait_random_exponential", lambda **_: 0)
+
+    result = await llm.query(messages=[], tools=None)
+
+    assert calls["n"] == 2
+    assert result.content == "recovered"
